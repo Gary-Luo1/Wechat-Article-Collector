@@ -133,8 +133,8 @@ into the generated private profile, or configure the private profile through
 secret stdin. The import never runs lark-cli against the original configuration,
 never changes it, and deliberately excludes user authorization entries. Only
 then does the Agent run
-`manage feishu-context --verify`. Supported OpenClaw/Hermes/Lark Channel
-environments can explicitly bind their Agent app before the context check. The
+`manage feishu-context --verify`. Supported Lark Channel environments can
+explicitly bind their Agent app before the context check. The
 confirmed App ID/user are enforced again before table access. For `user`, an
 existing valid authorization is reused; otherwise exactly one `base` authorization
 flow is started and resumed. For `bot`, user authorization is never started; bot

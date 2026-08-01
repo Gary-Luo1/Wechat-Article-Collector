@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from config_store import ConfigError, load_config, save_config, update_health
+from config_store import ConfigError, load_config, modify_config, update_health
 from protocol import dump, failure, success
 from queue_helpers import add_pending, cleanup_processed, normalize_url, read_queue
 from subscription_resolution import exact_matches, sanitize_candidates, subscription_query
@@ -39,8 +39,8 @@ def resolve_subscriptions(
         request_delay=config["settings"]["request_delay"],
     )
     results: list[dict] = []
-    changed = False
     unresolved = 0
+    pending: list[tuple[tuple[str, str, str], tuple[str, str, str]]] = []
     for subscription in config["subscriptions"]:
         name = str(subscription.get("name", "")).strip()
         alias = str(subscription.get("alias", "")).strip()
@@ -57,12 +57,22 @@ def resolve_subscriptions(
         if len(exact) == 1 and exact[0]["biz"]:
             status = "exact"
             if save:
-                subscription["biz"] = exact[0]["biz"]
-                if not subscription.get("name"):
-                    subscription["name"] = exact[0]["name"]
-                if not subscription.get("alias"):
-                    subscription["alias"] = exact[0]["alias"]
-                changed = True
+                pending.append(
+                    (
+                        (
+                            str(subscription.get("name", "")).strip(),
+                            str(subscription.get("alias", "")).strip(),
+                            str(subscription.get("biz", "")).strip(),
+                        ),
+                        (
+                            exact[0]["biz"],
+                            str(subscription.get("name", "")).strip()
+                            or str(exact[0].get("name", "")).strip(),
+                            str(subscription.get("alias", "")).strip()
+                            or str(exact[0].get("alias", "")).strip(),
+                        ),
+                    )
+                )
         elif len(exact) > 1:
             status = "ambiguous"
             unresolved += 1
@@ -72,8 +82,24 @@ def resolve_subscriptions(
         results.append(
             {"query": query, "status": status, "exact": exact, "candidates": sanitized}
         )
-    if save and changed:
-        save_config(config, config_path)
+    if save and pending:
+        def mutate(config: dict) -> dict:
+            for original, resolved in pending:
+                for sub in config["subscriptions"]:
+                    if (
+                        str(sub.get("name", "")).strip(),
+                        str(sub.get("alias", "")).strip(),
+                        str(sub.get("biz", "")).strip(),
+                    ) == original:
+                        sub["biz"] = resolved[0]
+                        if not str(sub.get("name", "")).strip():
+                            sub["name"] = resolved[1]
+                        if not str(sub.get("alias", "")).strip():
+                            sub["alias"] = resolved[2]
+                        break
+            return config
+
+        modify_config(mutate, path=config_path)
     try:
         update_health(
             "subscriptions",
@@ -102,6 +128,7 @@ def discover_articles(
     cutoff = time.time() - hours * 3600
     discovered: list[dict] = []
     config_changed = False
+    pending_biz: list[tuple[tuple[str, str, str], str]] = []
     for subscription in config["subscriptions"]:
         name = str(subscription.get("name", "")).strip()
         alias = str(subscription.get("alias", "")).strip()
@@ -128,6 +155,12 @@ def discover_articles(
                 if diagnostics is not None:
                     diagnostics.append(diagnostic)
                 continue
+            pending_biz.append(
+                (
+                    (name, alias, ""),
+                    biz,
+                )
+            )
             subscription["biz"] = biz
             config_changed = True
         limit = int(settings["max_articles_per_account"])
@@ -164,7 +197,19 @@ def discover_articles(
         if diagnostics is not None:
             diagnostics.append(diagnostic)
     if config_changed:
-        save_config(config, config_path)
+        def mutate(config: dict) -> dict:
+            for original, resolved_biz in pending_biz:
+                for sub in config["subscriptions"]:
+                    if (
+                        str(sub.get("name", "")).strip(),
+                        str(sub.get("alias", "")).strip(),
+                        str(sub.get("biz", "")).strip(),
+                    ) == original:
+                        sub["biz"] = resolved_biz
+                        break
+            return config
+
+        modify_config(mutate, path=config_path)
     return discovered
 
 

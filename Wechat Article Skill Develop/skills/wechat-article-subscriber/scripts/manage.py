@@ -32,8 +32,8 @@ from config_store import (
     DEFAULT_CONFIG,
     ConfigError,
     load_config,
+    modify_config,
     redacted_config,
-    save_config,
     update_health,
     validate_config,
 )
@@ -405,26 +405,25 @@ def _status() -> tuple[dict[str, Any], str]:
 
 
 def _detect_agent_source() -> str:
-    signals = {
-        "openclaw": ("OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_GATEWAY_TOKEN"),
-        "hermes": ("HERMES_HOME", "HERMES_STATE_DIR"),
-        "lark-channel": ("LARK_CHANNEL", "LARK_CHANNEL_HOME", "LARK_CHANNEL_APP_ID"),
-    }
-    for source, names in signals.items():
-        if any(os.environ.get(name) for name in names):
-            return source
-    return ""
+    signals = ("LARK_CHANNEL", "LARK_CHANNEL_HOME", "LARK_CHANNEL_APP_ID")
+    return "lark-channel" if any(os.environ.get(name) for name in signals) else ""
 
 
 def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
-    config = load_config()
-    previous = str(config["feishu"].get("destination") or "undecided")
-    config["feishu"]["destination"] = destination
-    if destination == "skip":
-        config["feishu"]["enabled"] = False
-    if previous != destination:
-        invalidate_policy(config)
-    save_config(config)
+    state: dict[str, Any] = {}
+
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        previous = str(config["feishu"].get("destination") or "undecided")
+        config["feishu"]["destination"] = destination
+        if destination == "skip":
+            config["feishu"]["enabled"] = False
+        state["previous"] = previous
+        state["changed"] = previous != destination
+        if state["changed"]:
+            invalidate_policy(config)
+        return config
+
+    modify_config(mutate)
     next_action = (
         "review_and_confirm_execution_policy"
         if destination == "skip"
@@ -432,10 +431,10 @@ def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
     )
     return {
         "destination": destination,
-        "previous_destination": previous,
+        "previous_destination": state["previous"],
         "explicit_user_choice_required": True,
         "target_or_credentials_deleted": False,
-        "execution_policy_invalidated": previous != destination,
+        "execution_policy_invalidated": state["changed"],
     }, next_action
 
 
@@ -456,10 +455,8 @@ def _import_feishu_host_context() -> tuple[dict[str, Any], str]:
             f"Feishu host context contains unsupported keys: {sorted(unexpected)}"
         )
     source = str(payload.get("source") or "").strip().casefold()
-    if source not in {"openclaw", "hermes", "lark-channel"}:
-        raise ValueError(
-            "Feishu host context source must be openclaw, hermes, or lark-channel"
-        )
+    if source != "lark-channel":
+        raise ValueError("Feishu host context source must be lark-channel")
     detected_source = _detect_agent_source()
     if detected_source and detected_source != source:
         raise ValueError(
@@ -474,64 +471,68 @@ def _import_feishu_host_context() -> tuple[dict[str, Any], str]:
     if not sender_open_id.startswith("ou_"):
         raise ValueError("trusted Feishu host sender Open ID must start with ou_")
 
-    config = load_config()
-    destination = config["feishu"]["destination"]
-    if destination not in {"existing", "create"}:
-        raise ValueError(
-            "choose existing or create as the Feishu destination before importing "
-            "the current bot context"
-        )
-    if (
-        config["setup"]["feishu_identity_confirmed"]
-        and config["feishu"]["identity"] != "bot"
-    ):
-        raise ValueError(
-            "the current setup already confirms user identity; do not silently switch "
-            "it to the conversational bot"
-        )
-    expected_app_id = str(config["feishu"].get("expected_app_id") or "").strip()
-    if expected_app_id and expected_app_id != app_id:
-        raise ValueError(
-            "the current Feishu conversation App ID conflicts with the saved App ID"
-        )
-    manager_open_id = str(config["feishu"].get("manager_open_id") or "").strip()
-    if manager_open_id and manager_open_id != sender_open_id:
-        raise ValueError(
-            "the current Feishu sender conflicts with the saved human manager"
-        )
+    state: dict[str, Any] = {}
 
-    previous_scope = (
-        config["feishu"]["identity"],
-        config["feishu"]["binding_mode"],
-        config["feishu"]["agent_source"],
-        config["feishu"]["expected_app_id"],
-        config["feishu"]["manager_open_id"],
-    )
-    config["feishu"].update(
-        {
-            "identity": "bot",
-            "binding_mode": "agent",
-            "agent_source": source,
-            "expected_app_id": app_id,
-            "cli_profile": "",
-            "expected_user_open_id": "",
-            "manager_open_id": sender_open_id,
-        }
-    )
-    config["setup"]["feishu_identity_confirmed"] = True
-    _reset_authorization(config, "bot")
-    current_scope = (
-        config["feishu"]["identity"],
-        config["feishu"]["binding_mode"],
-        config["feishu"]["agent_source"],
-        config["feishu"]["expected_app_id"],
-        config["feishu"]["manager_open_id"],
-    )
-    changed = previous_scope != current_scope
-    if changed:
-        config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
-        invalidate_policy(config)
-    save_config(config)
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        destination = config["feishu"]["destination"]
+        if destination not in {"existing", "create"}:
+            raise ValueError(
+                "choose existing or create as the Feishu destination before importing "
+                "the current bot context"
+            )
+        if (
+            config["setup"]["feishu_identity_confirmed"]
+            and config["feishu"]["identity"] != "bot"
+        ):
+            raise ValueError(
+                "the current setup already confirms user identity; do not silently switch "
+                "it to the conversational bot"
+            )
+        expected_app_id = str(config["feishu"].get("expected_app_id") or "").strip()
+        if expected_app_id and expected_app_id != app_id:
+            raise ValueError(
+                "the current Feishu conversation App ID conflicts with the saved App ID"
+            )
+        manager_open_id = str(config["feishu"].get("manager_open_id") or "").strip()
+        if manager_open_id and manager_open_id != sender_open_id:
+            raise ValueError(
+                "the current Feishu sender conflicts with the saved human manager"
+            )
+
+        previous_scope = (
+            config["feishu"]["identity"],
+            config["feishu"]["binding_mode"],
+            config["feishu"]["agent_source"],
+            config["feishu"]["expected_app_id"],
+            config["feishu"]["manager_open_id"],
+        )
+        config["feishu"].update(
+            {
+                "identity": "bot",
+                "binding_mode": "agent",
+                "agent_source": source,
+                "expected_app_id": app_id,
+                "cli_profile": "",
+                "expected_user_open_id": "",
+                "manager_open_id": sender_open_id,
+            }
+        )
+        config["setup"]["feishu_identity_confirmed"] = True
+        _reset_authorization(config, "bot")
+        current_scope = (
+            config["feishu"]["identity"],
+            config["feishu"]["binding_mode"],
+            config["feishu"]["agent_source"],
+            config["feishu"]["expected_app_id"],
+            config["feishu"]["manager_open_id"],
+        )
+        state["changed"] = previous_scope != current_scope
+        if state["changed"]:
+            config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
+            invalidate_policy(config)
+        return config
+
+    modify_config(mutate)
     return {
         "source": source,
         "app_id": app_id,
@@ -540,7 +541,7 @@ def _import_feishu_host_context() -> tuple[dict[str, Any], str]:
         "manager_configured_from_sender": True,
         "sender_open_id_included": False,
         "binding_mode": "agent",
-        "execution_policy_invalidated": changed,
+        "execution_policy_invalidated": state["changed"],
         "host_context_contains_secrets": False,
     }, "bind_detected_feishu_bot"
 
@@ -611,16 +612,20 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
             }, "import_current_feishu_bot_context"
         profile_resolution = resolve_lark_profile(expected_app_id)
         if current["feishu"].get("cli_profile") != profile_resolution["profile"]:
-            current["feishu"]["cli_profile"] = profile_resolution["profile"]
-            save_config(current)
-        current = load_config()
+            def _set_profile(config: dict[str, Any]) -> dict[str, Any]:
+                config["feishu"]["cli_profile"] = profile_resolution["profile"]
+                return config
+
+            current = modify_config(_set_profile)
+        else:
+            current = load_config()
     else:
         profile_resolution = None
     context = feishu_identity_context(verify=verify)
     source = _detect_agent_source()
     saved_source = str(current["feishu"].get("agent_source") or "")
     selected_identity = str(current["feishu"].get("identity") or "user")
-    can_bind = source in {"openclaw", "hermes", "lark-channel"}
+    can_bind = source == "lark-channel"
     context.update(
         {
             "agent_source_detected": source,
@@ -636,8 +641,7 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
             ),
             "binding_modes": {
                 "agent": (
-                    "Bind the detected OpenClaw/Hermes/Lark Channel app after explicit "
-                    "confirmation."
+                    "Bind the detected Lark Channel app after explicit confirmation."
                     if can_bind
                     else "Unavailable: this Agent does not expose a supported app binding source."
                 ),
@@ -668,19 +672,25 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
 
 
 def _feishu_identity(identity: str) -> dict[str, Any]:
-    config = load_config()
-    previous = str(config["feishu"].get("identity") or "user")
-    was_confirmed = bool(config["setup"]["feishu_identity_confirmed"])
-    config["feishu"]["identity"] = identity
-    config["setup"]["feishu_identity_confirmed"] = True
-    if previous != identity or not was_confirmed:
-        config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
-        _reset_authorization(config, identity)
-        invalidate_policy(config)
-    save_config(config)
+    state: dict[str, Any] = {}
+
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        previous = str(config["feishu"].get("identity") or "user")
+        was_confirmed = bool(config["setup"]["feishu_identity_confirmed"])
+        config["feishu"]["identity"] = identity
+        config["setup"]["feishu_identity_confirmed"] = True
+        state["previous"] = previous
+        state["changed"] = previous != identity or not was_confirmed
+        if state["changed"]:
+            config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
+            _reset_authorization(config, identity)
+            invalidate_policy(config)
+        return config
+
+    config = modify_config(mutate)
     return {
         "identity": identity,
-        "previous_identity": previous,
+        "previous_identity": state["previous"],
         "identity_confirmed": True,
         "authorization_policy": (
             "reuse an existing valid user authorization; otherwise start one Base authorization flow"
@@ -695,31 +705,34 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
     normalized = app_id.strip()
     if not re.fullmatch(r"cli_[A-Za-z0-9]+", normalized):
         raise ValueError("Feishu App ID must start with cli_ and contain only letters/digits")
-    config = load_config()
-    if not config["setup"]["feishu_identity_confirmed"]:
-        raise ValueError("select user or bot identity before selecting the Feishu app")
-    previous = str(config["feishu"].get("expected_app_id") or "")
     profile = profile_name_for_app(normalized)
-    config["feishu"]["expected_app_id"] = normalized
-    config["feishu"]["cli_profile"] = profile
-    if not config["feishu"].get("binding_mode"):
-        config["feishu"]["binding_mode"] = "existing"
-    if previous != normalized:
-        config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
-        _reset_authorization(config, config["feishu"]["identity"])
-        invalidate_policy(config)
-        config["feishu"].update(
-            {
-                "enabled": False,
-                "expected_user_open_id": "",
-                "manager_open_id": "",
-                "base_token": "",
-                "table_id": "",
-                "provisioning": "",
-                "field_mapping": {},
-            }
-        )
-    save_config(config)
+
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        if not config["setup"]["feishu_identity_confirmed"]:
+            raise ValueError("select user or bot identity before selecting the Feishu app")
+        previous = str(config["feishu"].get("expected_app_id") or "")
+        config["feishu"]["expected_app_id"] = normalized
+        config["feishu"]["cli_profile"] = profile
+        if not config["feishu"].get("binding_mode"):
+            config["feishu"]["binding_mode"] = "existing"
+        if previous != normalized:
+            config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
+            _reset_authorization(config, config["feishu"]["identity"])
+            invalidate_policy(config)
+            config["feishu"].update(
+                {
+                    "enabled": False,
+                    "expected_user_open_id": "",
+                    "manager_open_id": "",
+                    "base_token": "",
+                    "table_id": "",
+                    "provisioning": "",
+                    "field_mapping": {},
+                }
+            )
+        return config
+
+    modify_config(mutate)
     return {
         "app_selected": True,
         "app_id_included": False,
@@ -849,20 +862,30 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
             "Feishu Base creation requires the explicit destination=create choice",
             kind="confirmation",
         )
+    has_token = bool(str(config["feishu"].get("base_token") or "").strip())
+    has_table = bool(str(config["feishu"].get("table_id") or "").strip())
+    resuming = (
+        config["feishu"].get("provisioning") == "created"
+        and has_token
+        and has_table
+    )
     schema = standard_field_schema()
+    base_name = " ".join(str(arguments.name).split())
+    table_name = " ".join(str(arguments.table_name).split())
     preview = {
-        "base_name": arguments.name,
-        "table_name": arguments.table_name,
+        "base_name": base_name,
+        "table_name": table_name,
         "identity": config["feishu"]["identity"],
         "field_count": len(schema),
         "field_names": [field["name"] for field in schema],
         "transport": "native lark-cli binary with an argv array; no shell JSON",
         "global_profiles_modified": False,
+        "resuming_existing_base": resuming,
     }
     policy_authorized = allows_automatic_provisioning(
         config,
-        base_name=arguments.name,
-        table_name=arguments.table_name,
+        base_name=base_name,
+        table_name=table_name,
     )
     preview["authorization_source"] = (
         "persisted_execution_policy" if policy_authorized else "current_command"
@@ -873,12 +896,31 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
             "created": False,
             "policy_match": False,
         }, "rerun_with_yes"
-    if config["feishu"]["base_token"] or config["feishu"]["table_id"]:
+    if (has_token or has_table) and not resuming:
         raise LarkCLIError(
             "a Feishu target is already configured; refusing to create another Base "
             "without a new target decision",
             kind="config",
         )
+    if resuming:
+        stored_base_name = str(
+            config["feishu"].get("created_base_name") or ""
+        ).strip()
+        stored_table_name = str(
+            config["feishu"].get("created_table_name") or ""
+        ).strip()
+        if stored_base_name and base_name != stored_base_name:
+            raise LarkCLIError(
+                f"the earlier Base was created as {stored_base_name!r}; rerun with "
+                "the same --name to resume it",
+                kind="config",
+            )
+        if stored_table_name and table_name != stored_table_name:
+            raise LarkCLIError(
+                f"the earlier Base table was created as {stored_table_name!r}; "
+                "rerun with the same --table-name to resume it",
+                kind="config",
+            )
     if not config["setup"]["feishu_identity_confirmed"]:
         raise LarkCLIError("confirm Feishu identity before Base creation", kind="config")
     identity = config["feishu"]["identity"]
@@ -897,39 +939,66 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
             kind="config",
         )
     verify_feishu_identity(config["feishu"], identity=identity)
-    payload = create_standard_base(
-        arguments.name,
-        arguments.table_name,
-        identity=identity,
-    )
-    base_token, table_id = created_base_identifiers(payload)
+    if resuming:
+        base_token = str(config["feishu"]["base_token"])
+        table_id = str(config["feishu"]["table_id"])
+    else:
+        payload = create_standard_base(
+            base_name,
+            table_name,
+            identity=identity,
+        )
+        base_token, table_id = created_base_identifiers(payload)
 
-    # Save the resource for recovery, but keep sync disabled until permission
-    # and schema verification both succeed.
-    config = load_config()
-    config["feishu"].update(
-        {
-            "enabled": False,
-            "base_token": base_token,
-            "table_id": table_id,
-            "provisioning": "created",
-            "field_mapping": {},
-        }
-    )
-    save_config(config)
+    # Persist the recovery anchor before any external permission/schema step,
+    # so a later failure can resume from this exact state.
+    def mutate_created(config: dict[str, Any]) -> dict[str, Any]:
+        config["feishu"].update(
+            {
+                "enabled": False,
+                "base_token": base_token,
+                "table_id": table_id,
+                "provisioning": "created",
+                "field_mapping": {},
+                "created_base_name": str(
+                    config["feishu"].get("created_base_name") or ""
+                ).strip()
+                or base_name,
+                "created_table_name": str(
+                    config["feishu"].get("created_table_name") or ""
+                ).strip()
+                or table_name,
+            }
+        )
+        return config
+
+    config = modify_config(mutate_created)
     manager_granted = identity != "bot"
     if identity == "bot":
-        grant_bot_created_resource(base_token, "bitable", manager_open_id)
+        try:
+            grant_bot_created_resource(base_token, "bitable", manager_open_id)
+        except LarkCLIError as exc:
+            if not resuming or exc.kind != "duplicate":
+                raise
+            # Re-running after a partial grant reports the member as already
+            # present (classified as kind="duplicate"); treat that as success.
         manager_granted = True
 
-    config["feishu"]["enabled"] = True
-    save_config(config)
     check = preflight_feishu(config["feishu"])
-    config["feishu"]["field_mapping"] = check["mapping"]
-    config["setup"]["execution_policy"]["allow_feishu_provisioning"] = False
-    config["setup"]["execution_policy"]["provision_base_name"] = ""
-    config["setup"]["execution_policy"]["provision_table_name"] = ""
-    save_config(config)
+
+    def mutate_complete(config: dict[str, Any]) -> dict[str, Any]:
+        config["feishu"].update(
+            {
+                "enabled": True,
+                "field_mapping": check["mapping"],
+            }
+        )
+        config["setup"]["execution_policy"]["allow_feishu_provisioning"] = False
+        config["setup"]["execution_policy"]["provision_base_name"] = ""
+        config["setup"]["execution_policy"]["provision_table_name"] = ""
+        return config
+
+    config = modify_config(mutate_complete)
     update_health("feishu", success=True)
     return {
         "created": True,
@@ -938,6 +1007,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         "table_id": table_id,
         "manager_granted": manager_granted,
         "field_mapping_saved": True,
+        "resumed_existing": resuming,
         "provisioning_approval_consumed": policy_authorized,
         "authorization_source": (
             "persisted_execution_policy" if policy_authorized else "current_command"
@@ -949,14 +1019,17 @@ def _feishu_manager(open_id: str) -> dict[str, Any]:
     normalized = open_id.strip()
     if not normalized.startswith("ou_"):
         raise ValueError("manager Open ID must start with ou_")
-    config = load_config()
-    if not config["setup"]["feishu_identity_confirmed"] or config["feishu"]["identity"] != "bot":
-        raise ValueError("select and confirm bot identity before setting its human manager")
-    previous = str(config["feishu"].get("manager_open_id") or "")
-    config["feishu"]["manager_open_id"] = normalized
-    if previous != normalized:
-        invalidate_policy(config)
-    save_config(config)
+
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        if not config["setup"]["feishu_identity_confirmed"] or config["feishu"]["identity"] != "bot":
+            raise ValueError("select and confirm bot identity before setting its human manager")
+        previous = str(config["feishu"].get("manager_open_id") or "")
+        config["feishu"]["manager_open_id"] = normalized
+        if previous != normalized:
+            invalidate_policy(config)
+        return config
+
+    modify_config(mutate)
     return {
         "manager_configured": True,
         "manager_open_id_included": False,
@@ -1048,8 +1121,12 @@ def _execution_policy_command(
     if not arguments.yes:
         return {"preview": preview, "saved": False}, "rerun_with_yes"
     proposed["approved_at"] = datetime.now(timezone.utc).isoformat()
-    config["setup"]["execution_policy"] = proposed
-    save_config(config)
+
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        config["setup"]["execution_policy"] = proposed
+        return config
+
+    modify_config(mutate)
     return {
         "saved": True,
         "policy": deepcopy(proposed),
@@ -1070,25 +1147,28 @@ def _identity_ready(context: dict[str, Any], identity: str) -> bool:
 
 
 def _save_authorization_state(
-    config: dict[str, Any],
     state: str,
     *,
     started: bool = False,
     completed: bool = False,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
-    authorization = _authorization(config)
-    authorization["state"] = state
-    authorization["identity"] = config["feishu"]["identity"]
-    authorization["updated_at"] = now
-    if started:
-        authorization["started_at"] = now
-    if completed:
-        authorization["completed_at"] = now
-    if state in {"waiting", "expired", "failed", "not_started"}:
-        authorization["completed_at"] = ""
-    save_config(config)
-    return dict(authorization)
+
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        authorization = _authorization(config)
+        authorization["state"] = state
+        authorization["identity"] = config["feishu"]["identity"]
+        authorization["updated_at"] = now
+        if started:
+            authorization["started_at"] = now
+        if completed:
+            authorization["completed_at"] = now
+        if state in {"waiting", "expired", "failed", "not_started"}:
+            authorization["completed_at"] = ""
+        return config
+
+    config = modify_config(mutate)
+    return dict(_authorization(config))
 
 
 def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
@@ -1118,10 +1198,10 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             }, "rerun_with_yes"
         return {
             "identity": identity,
-            "authorization": _save_authorization_state(config, "expired"),
+            "authorization": _save_authorization_state("expired"),
         }, "run_feishu_auth_start"
     if identity == "bot":
-        state = _save_authorization_state(config, "not_required", completed=True)
+        state = _save_authorization_state("not_required", completed=True)
         return {
             "identity": "bot",
             "authorization": state,
@@ -1142,14 +1222,14 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
                 "new_authorization_started": False,
             }, "select_or_initialize_feishu_profile"
         if _identity_ready(context, "user"):
-            state = _save_authorization_state(config, "authorized", completed=True)
+            state = _save_authorization_state("authorized", completed=True)
             return {
                 "identity": identity,
                 "authorization": state,
                 "new_authorization_started": False,
                 "existing_authorization_reused": True,
             }, "confirm_feishu_app_and_user"
-        state = _save_authorization_state(config, "waiting", started=True)
+        state = _save_authorization_state("waiting", started=True)
         return {
             "identity": identity,
             "authorization": state,
@@ -1165,7 +1245,7 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             "authorization_verified": False,
         }, "select_or_initialize_feishu_profile"
     if _identity_ready(context, "user"):
-        state = _save_authorization_state(config, "authorized", completed=True)
+        state = _save_authorization_state("authorized", completed=True)
         return {
             "identity": identity,
             "authorization": state,
@@ -1209,13 +1289,24 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
         if not candidate:
             raise ValueError("provide --name, --alias, or --biz")
         identity = {str(candidate.get(key, "")).casefold() for key in ("name", "alias", "biz") if candidate.get(key)}
-        for existing in items:
-            existing_identity = {str(existing.get(key, "")).casefold() for key in ("name", "alias", "biz") if existing.get(key)}
-            if identity & existing_identity:
-                raise ValueError("subscription already exists")
-        items.append(candidate)
-        save_config(config)
-        return {"added": candidate, "count": len(items)}
+        state: dict[str, Any] = {}
+
+        def mutate_add(config: dict[str, Any]) -> dict[str, Any]:
+            current_items = config["subscriptions"]
+            for existing in current_items:
+                existing_identity = {
+                    str(existing.get(key, "")).casefold()
+                    for key in ("name", "alias", "biz")
+                    if existing.get(key)
+                }
+                if identity & existing_identity:
+                    raise ValueError("subscription already exists")
+            current_items.append(candidate)
+            state["count"] = len(current_items)
+            return config
+
+        modify_config(mutate_add)
+        return {"added": candidate, "count": state["count"]}
     if arguments.subscription_command == "bulk-add":
         candidates: list[Any] = list(arguments.name or [])
         if arguments.file:
@@ -1241,62 +1332,105 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("provide one or more --name values or --file")
         if len(candidates) > 100:
             raise ValueError("cannot add more than 100 subscriptions at once")
-        existing_identities = {
-            str(item.get(key, "")).strip().casefold()
-            for item in items
-            for key in ("name", "alias", "biz")
-            if str(item.get(key, "")).strip()
-        }
-        added: list[dict[str, str]] = []
-        skipped: list[str] = []
-        for value in candidates:
+        def normalize(value: Any) -> dict[str, str]:
             if isinstance(value, str):
-                candidate = {"name": value.strip()}
-            elif isinstance(value, dict):
+                return {"name": value.strip()}
+            if isinstance(value, dict):
                 unexpected = set(value) - {"name", "alias", "biz"}
                 if unexpected:
                     raise ValueError(f"unsupported subscription keys: {sorted(unexpected)}")
-                candidate = {}
+                normalized = {}
                 for key in ("name", "alias", "biz"):
                     raw = value.get(key, "")
                     if not isinstance(raw, str):
                         raise ValueError(f"subscription {key} must be a string")
                     if raw.strip():
-                        candidate[key] = raw.strip()
-            else:
-                raise ValueError("each subscription must be a name or object")
-            identities = {item.casefold() for item in candidate.values() if item}
-            if not identities:
-                raise ValueError("subscription entries cannot be empty")
-            if identities & existing_identities:
-                skipped.append(candidate.get("name") or next(iter(candidate.values())))
-                continue
-            added.append(candidate)
-            existing_identities.update(identities)
+                        normalized[key] = raw.strip()
+                return normalized
+            raise ValueError("each subscription must be a name or object")
+
+        normalized_candidates = [normalize(value) for value in candidates]
+        state: dict[str, Any] = {}
+
+        def mutate_bulk(config: dict[str, Any]) -> dict[str, Any]:
+            current_items = config["subscriptions"]
+            existing_identities = {
+                str(item.get(key, "")).strip().casefold()
+                for item in current_items
+                for key in ("name", "alias", "biz")
+                if str(item.get(key, "")).strip()
+            }
+            added_local: list[dict[str, str]] = []
+            skipped_local: list[str] = []
+            for candidate in normalized_candidates:
+                identities = {item.casefold() for item in candidate.values() if item}
+                if not identities:
+                    raise ValueError("subscription entries cannot be empty")
+                if identities & existing_identities:
+                    skipped_local.append(candidate.get("name") or next(iter(candidate.values())))
+                    continue
+                added_local.append(candidate)
+                existing_identities.update(identities)
+            state["added"] = added_local
+            state["skipped"] = skipped_local
+            state["total"] = len(current_items) + len(added_local)
+            current_items.extend(added_local)
+            return config
+
         if not arguments.dry_run:
-            items.extend(added)
-            save_config(config)
+            modify_config(mutate_bulk)
+        else:
+            existing_identities = {
+                str(item.get(key, "")).strip().casefold()
+                for item in items
+                for key in ("name", "alias", "biz")
+                if str(item.get(key, "")).strip()
+            }
+            state["added"] = []
+            state["skipped"] = []
+            for candidate in normalized_candidates:
+                identities = {item.casefold() for item in candidate.values() if item}
+                if not identities:
+                    raise ValueError("subscription entries cannot be empty")
+                if identities & existing_identities:
+                    state["skipped"].append(candidate.get("name") or next(iter(candidate.values())))
+                else:
+                    state["added"].append(candidate)
+                    existing_identities.update(identities)
         return {
             "dry_run": bool(arguments.dry_run),
-            "added": added,
-            "added_count": len(added),
-            "skipped_duplicates": skipped,
-            "total": len(items) + (len(added) if arguments.dry_run else 0),
+            "added": state["added"],
+            "added_count": len(state["added"]),
+            "skipped_duplicates": state["skipped"],
+            "total": (
+                len(items) + len(state["added"])
+                if arguments.dry_run
+                else state["total"]
+            ),
         }
     selector = arguments.value.casefold()
-    retained = [
-        item
-        for item in items
-        if selector not in {
-            str(item.get(key, "")).casefold() for key in ("name", "alias", "biz")
-        }
-    ]
-    removed = len(items) - len(retained)
-    if not removed:
-        raise LookupError("subscription not found")
-    config["subscriptions"] = retained
-    save_config(config)
-    return {"removed": removed, "count": len(retained)}
+    state: dict[str, Any] = {}
+
+    def mutate_remove(config: dict[str, Any]) -> dict[str, Any]:
+        current_items = config["subscriptions"]
+        retained = [
+            item
+            for item in current_items
+            if selector
+            not in {
+                str(item.get(key, "")).casefold() for key in ("name", "alias", "biz")
+            }
+        ]
+        removed = len(current_items) - len(retained)
+        if not removed:
+            raise LookupError("subscription not found")
+        config["subscriptions"] = retained
+        state["removed"] = removed
+        state["count"] = len(retained)
+        return config
+
+    modify_config(mutate_remove)
+    return {"removed": state["removed"], "count": state["count"]}
 
 
 def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
@@ -1310,9 +1444,13 @@ def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
                 "preview": dict(DEFAULT_CONFIG["preferences"]),
                 "current": current,
             }, "rerun_with_yes"
-        config["preferences"] = dict(DEFAULT_CONFIG["preferences"])
-        save_config(config)
-        return {"preferences": config["preferences"], "cleared": True}, "none"
+
+        def mutate_clear(config: dict[str, Any]) -> dict[str, Any]:
+            config["preferences"] = dict(DEFAULT_CONFIG["preferences"])
+            return config
+
+        saved = modify_config(mutate_clear)
+        return {"preferences": saved["preferences"], "cleared": True}, "none"
     updates: dict[str, Any] = {}
     list_updates = {
         "include_topics": arguments.include_topic,
@@ -1331,9 +1469,13 @@ def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         updates["digest_limit"] = arguments.digest_limit
     if not updates:
         raise ValueError("provide at least one preference update")
-    current.update(updates)
-    save_config(config)
-    return {"preferences": current, "updated_fields": sorted(updates)}, "generate_digest_plan"
+
+    def mutate_update(config: dict[str, Any]) -> dict[str, Any]:
+        config["preferences"].update(updates)
+        return config
+
+    saved = modify_config(mutate_update)
+    return {"preferences": saved["preferences"], "updated_fields": sorted(updates)}, "generate_digest_plan"
 
 
 def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
@@ -1370,31 +1512,33 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     if not arguments.yes:
         return {"preview": [str(path) for path in existing], "deleted": []}, "rerun_with_yes"
     if scope == "credentials":
-        config = load_config()
-        config["wechat"] = {"cookie": "", "token": ""}
-        config["setup"]["feishu_identity_confirmed"] = False
-        config["setup"]["feishu_authorization"] = dict(
-            DEFAULT_CONFIG["setup"]["feishu_authorization"]
-        )
-        config["setup"]["execution_policy"] = deepcopy(
-            DEFAULT_CONFIG["setup"]["execution_policy"]
-        )
-        config["feishu"].update({
-            "destination": "undecided",
-            "enabled": False,
-            "binding_mode": "",
-            "agent_source": "",
-            "expected_app_id": "",
-            "cli_profile": "",
-            "expected_user_open_id": "",
-            "manager_open_id": "",
-            "base_token": "",
-            "table_id": "",
-            "field_mapping": {},
-            "provisioning": "",
-        })
-        config["health"] = validate_config(DEFAULT_CONFIG)["health"]
-        save_config(config)
+        def mutate_reset(config: dict[str, Any]) -> dict[str, Any]:
+            config["wechat"] = {"cookie": "", "token": ""}
+            config["setup"]["feishu_identity_confirmed"] = False
+            config["setup"]["feishu_authorization"] = dict(
+                DEFAULT_CONFIG["setup"]["feishu_authorization"]
+            )
+            config["setup"]["execution_policy"] = deepcopy(
+                DEFAULT_CONFIG["setup"]["execution_policy"]
+            )
+            config["feishu"].update({
+                "destination": "undecided",
+                "enabled": False,
+                "binding_mode": "",
+                "agent_source": "",
+                "expected_app_id": "",
+                "cli_profile": "",
+                "expected_user_open_id": "",
+                "manager_open_id": "",
+                "base_token": "",
+                "table_id": "",
+                "field_mapping": {},
+                "provisioning": "",
+            })
+            config["health"] = validate_config(DEFAULT_CONFIG)["health"]
+            return config
+
+        modify_config(mutate_reset)
         return {"cleared": "credentials", "preserved": ["subscriptions", "settings", "queue"]}, "ask_user_to_choose_chat_or_local_file"
     root = data_dir().resolve()
     for target in existing:
@@ -1571,10 +1715,12 @@ def main(argv: list[str] | None = None) -> int:
             if not arguments.yes:
                 data, next_action = {"preview": "disable Feishu sync; no Base data is deleted"}, "rerun_with_yes"
             else:
-                config = load_config()
-                config["feishu"]["enabled"] = False
-                config["setup"]["execution_policy"]["allow_feishu_sync"] = False
-                save_config(config)
+                def mutate_disable(config: dict[str, Any]) -> dict[str, Any]:
+                    config["feishu"]["enabled"] = False
+                    config["setup"]["execution_policy"]["allow_feishu_sync"] = False
+                    return config
+
+                modify_config(mutate_disable)
                 data = {"disabled": True, "base_data_deleted": False}
         else:
             data, next_action = _reset(arguments)

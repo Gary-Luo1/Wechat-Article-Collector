@@ -304,6 +304,23 @@ class TestQueue:
         assert len(queue["pending"]) == 1
         assert queue["processed"] == {}
 
+    def test_complete_after_dismiss_raises(self):
+        from queue_helpers import (
+            add_pending,
+            complete_article,
+            dismiss_article,
+            read_queue,
+        )
+
+        add_pending([article("a")])
+        dismissed = dismiss_article(article("a")["link"])
+        with pytest.raises(LookupError, match="dismissed"):
+            complete_article(article("a")["link"], {"score": 8}, sync_status="pending")
+        queue = read_queue()
+        entry = next(iter(queue["processed"].values()))
+        assert entry["metadata"] == dismissed["metadata"]
+        assert entry["sync_status"] == "not_requested"
+
     def test_corruption_is_quarantined(self):
         from paths import queue_path
         from queue_helpers import read_queue
@@ -983,6 +1000,63 @@ class TestProcess:
         assert main(["done", "--link", article("a")["link"], "--dims", self.dims()]) == 0
         processed = next(iter(read_queue()["processed"].values()))
         assert processed["sync_status"] == "not_requested"
+
+    def test_cmd_done_after_dismiss_returns_clean_error(self, capsys):
+        import process_pending
+        from queue_helpers import add_pending, dismiss_article
+
+        self.valid_config(feishu=True)
+        item = article("a")
+        add_pending([item])
+        dismiss_article(item["link"])
+        with mock.patch.object(process_pending, "_sync_entry") as sync:
+            result = process_pending.main(
+                [
+                    "--format",
+                    "json",
+                    "done",
+                    "--link",
+                    item["link"],
+                    "--dims",
+                    self.dims(),
+                    "--feishu",
+                ]
+            )
+        assert result == 1
+        sync.assert_not_called()
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "ARTICLE_NOT_FOUND"
+
+    def test_cmd_done_race_after_dismiss_does_not_sync(self, capsys):
+        import process_pending
+        from queue_helpers import add_pending, dismiss_article
+
+        self.valid_config(feishu=True)
+        item = article("a")
+        add_pending([item])
+        dismiss_article(item["link"])
+        with mock.patch.object(
+            process_pending, "_resolve", return_value=dict(item)
+        ) as resolve, mock.patch.object(process_pending, "_sync_entry") as sync:
+            result = process_pending.main(
+                [
+                    "--format",
+                    "json",
+                    "done",
+                    "--link",
+                    item["link"],
+                    "--dims",
+                    self.dims(),
+                    "--feishu",
+                ]
+            )
+        assert result == 1
+        resolve.assert_called_once()
+        sync.assert_not_called()
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert "dismissed" in payload["error"]["message"]
 
     def test_failed_sync_stays_pending(self):
         import process_pending

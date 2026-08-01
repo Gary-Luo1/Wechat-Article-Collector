@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import time
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
-from paths import config_path, secure_write_json
+from paths import config_path, data_dir, secure_write_json
 
 
 CONFIG_VERSION = 10
@@ -51,6 +54,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "base_token": "",
         "table_id": "",
         "provisioning": "",
+        "created_base_name": "",
+        "created_table_name": "",
         "schema_policy": "mapped",
         "field_mapping": {},
     },
@@ -235,10 +240,8 @@ def _validate_feishu(feishu: Any) -> None:
         raise ConfigError(
             "feishu.binding_mode must be agent, existing, dedicated, or empty"
         )
-    if feishu["agent_source"] not in {"", "openclaw", "hermes", "lark-channel"}:
-        raise ConfigError(
-            "feishu.agent_source must be openclaw, hermes, lark-channel, or empty"
-        )
+    if feishu["agent_source"] not in {"", "lark-channel"}:
+        raise ConfigError("feishu.agent_source must be lark-channel or empty")
     if feishu["binding_mode"] == "agent" and not feishu["agent_source"]:
         raise ConfigError("feishu.agent_source is required for agent binding")
     if feishu["binding_mode"] != "agent" and feishu["agent_source"]:
@@ -470,6 +473,69 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     return target
 
 
+@contextmanager
+def config_lock(timeout: float = 10.0) -> Iterator[None]:
+    """Acquire a cross-platform process lock for configuration transactions."""
+    path = data_dir() / "config.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    deadline = time.monotonic() + timeout
+    acquired = False
+    try:
+        while not acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    if handle.tell() == 0:
+                        handle.write(b"0")
+                        handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for config lock {path}")
+                time.sleep(0.05)
+        yield
+    finally:
+        if acquired:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def modify_config(
+    mutator: Callable[[dict[str, Any]], dict[str, Any]],
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Apply a read-modify-write transaction to the configuration under lock.
+
+    The mutator receives the latest validated configuration, mutates it in
+    place, and returns it (returning ``None`` is accepted for in-place
+    mutation). The result is validated and saved before the lock is released.
+    If the mutator raises or validation fails, nothing is written.
+    """
+    with config_lock():
+        config = load_config(path)
+        result = mutator(config)
+        result = result if result is not None else config
+        save_config(result, path)
+        return validate_config(result)
+
+
 def update_health(
     section: str,
     *,
@@ -480,22 +546,24 @@ def update_health(
 ) -> dict[str, Any]:
     if section not in {"wechat", "subscriptions", "feishu"}:
         raise ConfigError(f"unsupported health section: {section}")
-    config = load_config(path)
-    health = config["health"][section]
     now = datetime.now(timezone.utc).isoformat()
-    if section == "subscriptions":
-        health["last_verified_at"] = now
-        if unresolved is not None:
-            health["unresolved"] = max(0, int(unresolved))
-    elif success:
-        health["last_verified_at"] = now
-        health["last_failure_kind"] = ""
-        health["consecutive_failures"] = 0
-    else:
-        health["last_failure_kind"] = failure_kind[:100]
-        health["consecutive_failures"] = int(health["consecutive_failures"]) + 1
-    save_config(config, path)
-    return config
+
+    def mutate(config: dict[str, Any]) -> dict[str, Any]:
+        health = config["health"][section]
+        if section == "subscriptions":
+            health["last_verified_at"] = now
+            if unresolved is not None:
+                health["unresolved"] = max(0, int(unresolved))
+        elif success:
+            health["last_verified_at"] = now
+            health["last_failure_kind"] = ""
+            health["consecutive_failures"] = 0
+        else:
+            health["last_failure_kind"] = failure_kind[:100]
+            health["consecutive_failures"] = int(health["consecutive_failures"]) + 1
+        return config
+
+    return modify_config(mutate, path=path)
 
 
 def redacted_config(config: dict[str, Any]) -> dict[str, Any]:

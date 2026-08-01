@@ -102,10 +102,10 @@ without a user OAuth flow.
 After the identity choice and installation, choose exactly one binding mode during
 the front-loaded configuration:
 
-1. `agent`: only when OpenClaw, Hermes, or Lark Channel is detected. After the
+1. `agent`: only when Lark Channel is detected. After the
    user confirms the App ID and `user-default` identity policy, run
-   `lark config bind --source <SOURCE> --app-id <APP_ID> --identity user-default`.
-   `--app-id` is required for OpenClaw multi-account selection. Binding changes
+   `lark config bind --source lark-channel --app-id <APP_ID> --identity user-default`.
+   Binding changes
    the Skill's isolated configuration, so include this exact choice in the
    front-loaded confirmation.
 2. `existing`/`dedicated`: first run

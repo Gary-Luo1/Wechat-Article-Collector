@@ -355,6 +355,10 @@ def complete_article(
         if article is None:
             existing = data["processed"].get(normalized)
             if existing:
+                if existing.get("metadata", {}).get("disposition") == "dismissed":
+                    raise LookupError(
+                        "article was dismissed and cannot be completed; restore it first"
+                    )
                 return deepcopy(existing)
             raise LookupError("article is no longer pending")
         data["pending"] = [

@@ -313,6 +313,34 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
         return LarkCLIError(
             _redact_cli_error(guidance, args), kind="authorization", code=code
         )
+    if (
+        error_type
+        in {
+            "member_already_exists",
+            "member_exist",
+            "already_exists",
+            "duplicate",
+        }
+        or any(
+            marker in lower
+            for marker in (
+                "already exists",
+                "already a member",
+                "already member",
+                "duplicate member",
+                "member already",
+                "has been added",
+            )
+        )
+    ):
+        # Re-granting a resource to the same manager is idempotent: lark-cli
+        # reports the member as already present. Resume flows may treat this as
+        # success; every other failure must keep failing loudly.
+        return LarkCLIError(
+            "the Feishu resource is already shared with this manager; treat as granted",
+            kind="duplicate",
+            code=code,
+        )
     retryable = (
         str(code) in {"429", "1254291"}
         or error_type in {"network", "timeout", "rate_limit"}

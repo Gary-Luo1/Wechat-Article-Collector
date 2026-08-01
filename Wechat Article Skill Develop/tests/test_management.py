@@ -527,7 +527,7 @@ def test_feishu_context_never_guesses_generic_agent_bot(
     configured()
     config = load_config()
     config["feishu"]["binding_mode"] = "agent"
-    config["feishu"]["agent_source"] = "openclaw"
+    config["feishu"]["agent_source"] = "lark-channel"
     config["setup"]["feishu_identity_confirmed"] = True
     save_config(config)
     monkeypatch.setattr(
@@ -537,16 +537,7 @@ def test_feishu_context_never_guesses_generic_agent_bot(
             "CLI default profile must not be read without the host App ID"
         ),
     )
-    for name in (
-        "OPENCLAW_HOME",
-        "OPENCLAW_STATE_DIR",
-        "OPENCLAW_GATEWAY_TOKEN",
-        "HERMES_HOME",
-        "HERMES_STATE_DIR",
-        "LARK_CHANNEL",
-        "LARK_CHANNEL_HOME",
-        "LARK_CHANNEL_APP_ID",
-    ):
+    for name in ("LARK_CHANNEL", "LARK_CHANNEL_HOME", "LARK_CHANNEL_APP_ID"):
         monkeypatch.delenv(name, raising=False)
     assert manage.main(["feishu-context", "--verify"]) == 0
     payload = json.loads(capsys.readouterr().out)

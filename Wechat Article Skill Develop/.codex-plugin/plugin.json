@@ -1,6 +1,6 @@
 {
   "name": "wechat-article-subscriber",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "description": "Local-first WeChat Official Account article discovery and Feishu Base workflow.",
   "author": "Gray",
   "repository": "https://github.com/Gary-Luo1/Wechat-",

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from copy import deepcopy
 import io
 import json
 import logging
@@ -19,8 +20,8 @@ from bitable_client import (
     standard_field_schema,
     upsert_article,
 )
-from config_store import DEFAULT_CONFIG, ConfigError, load_config, save_config, update_health
-from execution_policy import autopilot_policy
+from config_store import DEFAULT_CONFIG, ConfigError, load_config, modify_config, update_health
+from execution_policy import autopilot_policy, invalidate_for_feishu_change
 from feishu_target import FeishuTarget
 from protocol import dump, failure, success
 from queue_helpers import (
@@ -299,10 +300,17 @@ def cmd_ingest(arguments: argparse.Namespace) -> int:
     read_queue()
     subscription_added = False
     if subscribe_requested and not subscribed:
-        config["subscriptions"].append(
-            {key: value for key, value in {"name": account, "biz": account_id}.items() if value}
-        )
-        save_config(config)
+        def mutate_subscribe(config: dict[str, Any]) -> dict[str, Any]:
+            config["subscriptions"].append(
+                {
+                    key: value
+                    for key, value in {"name": account, "biz": account_id}.items()
+                    if value
+                }
+            )
+            return config
+
+        config = modify_config(mutate_subscribe)
         subscribed = True
         subscription_added = True
     article = {
@@ -465,6 +473,8 @@ def cmd_done(arguments: argparse.Namespace) -> int:
         print(f"Dry run succeeded; article remains pending: {article.get('title', '')}")
         return 0
     entry = complete_article(article["link"], metadata, sync_status=status)
+    if entry.get("metadata", {}).get("disposition") == "dismissed":
+        raise LookupError("article was dismissed and cannot be completed")
     if status == "pending":
         try:
             _sync_entry(entry, dry_run=arguments.dry_run)
@@ -513,8 +523,13 @@ def cmd_feishu_check(*, save_mapping: bool = False) -> int:
             pass
         raise
     if save_mapping:
-        config["feishu"]["field_mapping"] = check["mapping"]
-        save_config(config)
+        def mutate_mapping(config: dict[str, Any]) -> dict[str, Any]:
+            previous = deepcopy(config["feishu"])
+            config["feishu"]["field_mapping"] = check["mapping"]
+            invalidate_for_feishu_change(config, previous, config["feishu"])
+            return config
+
+        config = modify_config(mutate_mapping)
     update_health("feishu", success=True)
     print(
         json.dumps(

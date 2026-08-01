@@ -8,11 +8,16 @@ from typing import Any
 FEISHU_APPROVAL_SCOPE_FIELDS = (
     "destination",
     "identity",
+    "binding_mode",
+    "agent_source",
     "expected_app_id",
+    "expected_user_open_id",
+    "cli_profile",
     "manager_open_id",
     "base_token",
     "table_id",
     "schema_policy",
+    "field_mapping",
 )
 
 

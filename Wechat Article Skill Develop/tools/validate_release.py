@@ -139,11 +139,36 @@ def validate_plugin() -> None:
         fail(f"plugin interface is missing: {sorted(missing)}")
 
 
+def validate_version_consistency(
+    plugin_path: Path | None = None,
+    changelog_path: Path | None = None,
+) -> None:
+    """Fail when the plugin manifest version drifts from the changelog head."""
+    manifest_path = plugin_path or (ROOT / ".codex-plugin" / "plugin.json")
+    history_path = changelog_path or (ROOT / "CHANGELOG.md")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    plugin_version = str(manifest.get("version", ""))
+    match = re.search(
+        r"^##\s+(\d+\.\d+\.\d+)",
+        history_path.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    if not match:
+        fail("CHANGELOG.md must start with a semantic version heading")
+    changelog_version = match.group(1)
+    if plugin_version != changelog_version:
+        fail(
+            f"plugin.json version {plugin_version} does not match "
+            f"CHANGELOG version {changelog_version}"
+        )
+
+
 def main() -> int:
     try:
         validate_skill()
         validate_adapters()
         validate_plugin()
+        validate_version_consistency()
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         print(f"release validation failed: {exc}", file=sys.stderr)
         return 1

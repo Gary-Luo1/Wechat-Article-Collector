@@ -6,6 +6,7 @@ __pycache__/
 venv/
 dist/
 build/
+.DS_Store
 .env
 config.json
 queue.json

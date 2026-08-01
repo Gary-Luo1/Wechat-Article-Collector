@@ -21,6 +21,7 @@ from config_store import (
     LEGACY_FIELD_MAPPING,
     ConfigError,
     load_config,
+    modify_config,
     save_config,
     validate_config,
 )
@@ -461,7 +462,9 @@ def setup_guide() -> dict[str, Any]:
     }
 
 
-def _normalize_feishu(value: Any) -> dict[str, Any]:
+def _normalize_feishu(
+    value: Any, existing: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if value is None:
         return deepcopy(DEFAULT_CONFIG["feishu"])
     if not isinstance(value, dict):
@@ -471,33 +474,41 @@ def _normalize_feishu(value: Any) -> dict[str, Any]:
         raise ConfigError(f"feishu contains unsupported keys: {sorted(unexpected)}")
     normalized = deepcopy(DEFAULT_CONFIG["feishu"])
     normalized.update(value)
+    if existing is not None:
+        # Partial patches keep every omitted field unchanged. Comparing against
+        # rebuilt defaults would treat untouched binding/identity/mapping fields
+        # as "scope changed" and spuriously invalidate the execution policy.
+        for key in set(normalized) - set(value):
+            normalized[key] = deepcopy(existing.get(key, DEFAULT_CONFIG["feishu"][key]))
+        if (
+            str(existing.get("expected_app_id") or "").strip()
+            != str(normalized.get("expected_app_id") or "").strip()
+        ):
+            # cli_profile is derived from the App ID; a new App ID must not
+            # inherit the old profile.
+            normalized["cli_profile"] = ""
     if "destination" not in value:
-        has_target = bool(normalized.get("base_token")) and bool(normalized.get("table_id"))
-        if normalized.get("provisioning") == "created":
-            normalized["destination"] = "create"
-        elif has_target or normalized.get("provisioning") == "existing":
-            normalized["destination"] = "existing"
-        elif value.get("enabled") is False:
-            # Backward-compatible explicit skip. Omitting the entire Feishu
-            # object still leaves the full setup in the undecided state.
-            normalized["destination"] = "skip"
+        if any(key in value for key in ("base_token", "table_id", "provisioning", "enabled")):
+            has_target = bool(normalized.get("base_token")) and bool(normalized.get("table_id"))
+            if normalized.get("provisioning") == "created":
+                normalized["destination"] = "create"
+            elif has_target or normalized.get("provisioning") == "existing":
+                normalized["destination"] = "existing"
+            elif value.get("enabled") is False:
+                # Backward-compatible explicit skip. Omitting the entire Feishu
+                # object still leaves the full setup in the undecided state.
+                normalized["destination"] = "skip"
     # Supplying a complete target means sync is intentionally enabled unless
-    # the Agent explicitly sends enabled=false.
-    if "enabled" not in value and normalized.get("base_token") and normalized.get("table_id"):
-        normalized["enabled"] = True
-    return normalized
-
-
-def _preserve_internal_feishu_profile(
-    existing: dict[str, Any], normalized: dict[str, Any]
-) -> dict[str, Any]:
-    """Keep the derived profile only while the confirmed App ID is unchanged."""
+    # the Agent explicitly sends enabled=false. Only a target supplied by this
+    # patch (not one preserved from the existing config) implies enablement.
     if (
-        str(existing.get("expected_app_id") or "").strip()
-        and str(existing.get("expected_app_id") or "").strip()
-        == str(normalized.get("expected_app_id") or "").strip()
+        "enabled" not in value
+        and "base_token" in value
+        and "table_id" in value
+        and normalized.get("base_token")
+        and normalized.get("table_id")
     ):
-        normalized["cli_profile"] = str(existing.get("cli_profile") or "").strip()
+        normalized["enabled"] = True
     return normalized
 
 
@@ -577,18 +588,6 @@ def config_from_agent_payload(payload: Any) -> dict[str, Any]:
     return validate_config(config, require_wechat=True)
 
 
-def config_from_feishu_payload(payload: Any) -> dict[str, Any]:
-    config = load_config(require_wechat=True)
-    previous_feishu = config["feishu"]
-    normalized_feishu = _preserve_internal_feishu_profile(
-        config["feishu"], _normalize_feishu(payload)
-    )
-    config["feishu"] = normalized_feishu
-    invalidate_for_feishu_change(config, previous_feishu, normalized_feishu)
-    _record_feishu_identity_choice(config, payload)
-    return validate_config(config, require_wechat=True)
-
-
 def _normalize_settings(value: Any, *, partial: bool) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError("settings must be an object")
@@ -629,15 +628,12 @@ def _normalize_execution_policy(value: Any, *, partial: bool) -> dict[str, Any]:
     return normalized
 
 
-def config_from_section_payload(section: str, payload: Any) -> dict[str, Any]:
-    if section == "full":
-        return config_from_agent_payload(payload)
-    config = load_config(require_wechat=True)
+def _apply_section_patch(
+    config: dict[str, Any], section: str, payload: Any
+) -> dict[str, Any]:
     if section == "feishu":
         previous_feishu = config["feishu"]
-        normalized_feishu = _preserve_internal_feishu_profile(
-            config["feishu"], _normalize_feishu(payload)
-        )
+        normalized_feishu = _normalize_feishu(payload, existing=config["feishu"])
         config["feishu"] = normalized_feishu
         invalidate_for_feishu_change(config, previous_feishu, normalized_feishu)
         _record_feishu_identity_choice(config, payload)
@@ -685,8 +681,14 @@ def _save_agent_raw(raw: str, *, section: str = "full", json_output: bool = Fals
         return 1
     try:
         payload = json.loads(raw.lstrip("\ufeff"))
-        config = config_from_section_payload(section, payload)
-        path = save_config(config)
+        if section == "full":
+            config = config_from_agent_payload(payload)
+            path = save_config(config)
+        else:
+            config = modify_config(
+                lambda current: _apply_section_patch(current, section, payload)
+            )
+            path = config_path()
     except (ConfigError, OSError, json.JSONDecodeError, UnicodeError) as exc:
         if json_output:
             print(dump(failure(exc)))
