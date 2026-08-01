@@ -855,7 +855,7 @@ class TestBitable:
         captured: dict[str, Any] = {}
 
         def fake_run(args, **kwargs):
-            fields_path = Path(tmp_path) / "base-fields.json"
+            fields_path = Path(tmp_path) / f"base-fields-{os.getpid()}.json"
             captured["fields"] = json.loads(
                 fields_path.read_text(encoding="utf-8")
             )
@@ -873,13 +873,13 @@ class TestBitable:
             )
         args = run.call_args.args[0]
         assert args[:2] == ["base", "+base-create"]
-        assert args[args.index("--fields") + 1] == "@base-fields.json"
+        assert args[args.index("--fields") + 1] == f"@base-fields-{os.getpid()}.json"
         fields = captured["fields"]
         assert len(fields) == 11
         assert fields[0]["name"] == "文章标题"
         assert any(field["name"] == "文章链接" for field in fields)
         assert "@-" not in args
-        assert not (Path(tmp_path) / "base-fields.json").exists()
+        assert not (Path(tmp_path) / f"base-fields-{os.getpid()}.json").exists()
         assert run.call_args.kwargs["retries"] == 1
 
     def test_created_base_identifiers_are_extracted_without_guessing(self):

@@ -23,8 +23,17 @@
 
 ### Fixed
 
-- Partial `execution_policy` patches no longer reset omitted fields (confirmed,
-  sync approval, unlisted-publisher behavior) to defaults.
+- Re-running the full `setup --agent-stdin` flow no longer resets configuration
+  that the host does not resend: Feishu binding, confirmed execution policy,
+  settings, and preferences are merged section-by-section instead of rebuilt
+  from defaults, matching the partial-patch semantics.
+- Partial `execution_policy`, `settings`, and `preferences` updates keep every
+  omitted field (confirmed, sync approval, unlisted-publisher behavior, etc.)
+  instead of resetting it to defaults.
+- Installer `--target all` now installs to every supported platform, including
+  the new OpenClaw and Hermes targets.
+- Concurrent Base creation no longer collides on a shared fixed-named fields
+  file; each call uses a process-unique temporary file.
 
 ## 2.1.0 - Unreleased
 

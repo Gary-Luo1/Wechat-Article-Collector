@@ -106,6 +106,45 @@ def test_unix_openclaw_and_hermes_targets(tmp_path: Path):
         assert (destination / "SKILL.md").is_file()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX installer test")
+def test_unix_all_target_covers_every_platform(tmp_path: Path):
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is unavailable")
+    environment = os.environ.copy()
+    environment["WECHAT_SKILL_INSTALL_ROOT"] = str(tmp_path / "install-root")
+    result = subprocess.run(
+        [
+            bash,
+            str(ROOT / "install.sh"),
+            "--target",
+            "all",
+            "--no-deps",
+        ],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert result.returncode == 0, result.stderr
+    expected = {
+        ".agents": "agents",
+        ".codex": "codex",
+        ".claude": "claude",
+        ".copilot": "copilot",
+        ".openclaw": "openclaw",
+        ".hermes": "hermes",
+    }
+    for directory in expected:
+        destination = (
+            tmp_path / "install-root" / directory / "skills" / SKILL_NAME
+        )
+        assert destination.is_dir(), f"--target all missed {expected[directory]}"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows installer test")
 def test_powershell_dependency_failure_preserves_existing_install(tmp_path: Path):
     powershell = shutil.which("pwsh") or shutil.which("powershell")

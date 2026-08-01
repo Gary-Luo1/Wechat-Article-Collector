@@ -595,7 +595,9 @@ def _record_feishu_identity_choice(config: dict[str, Any], value: Any) -> None:
     config["setup"]["feishu_identity_confirmed"] = True
 
 
-def config_from_agent_payload(payload: Any) -> dict[str, Any]:
+def config_from_agent_payload(
+    payload: Any, *, existing: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ConfigError("Agent configuration must be a JSON object")
     unexpected = set(payload) - AGENT_INPUT_KEYS
@@ -605,14 +607,25 @@ def config_from_agent_payload(payload: Any) -> dict[str, Any]:
         "feishu_base_token" in payload or "feishu_table_id" in payload
     ):
         raise ConfigError("use feishu or legacy Feishu fields, not both")
+    previous_feishu: dict[str, Any] | None = None
+    if existing is not None:
+        existing = validate_config(deepcopy(existing))
+        previous_feishu = deepcopy(existing["feishu"])
     if "feishu" in payload:
-        feishu = _normalize_feishu(payload["feishu"])
+        feishu = _normalize_feishu(
+            payload["feishu"],
+            existing=existing["feishu"] if existing is not None else None,
+        )
     else:
         base_token = _optional_string(payload, "feishu_base_token")
         table_id = _optional_string(payload, "feishu_table_id")
         if bool(base_token) != bool(table_id):
             raise ConfigError("provide both Feishu Base token and table ID, or leave both empty")
-        feishu = deepcopy(DEFAULT_CONFIG["feishu"])
+        feishu = (
+            deepcopy(existing["feishu"])
+            if existing is not None
+            else deepcopy(DEFAULT_CONFIG["feishu"])
+        )
         if base_token and table_id:
             feishu.update(
                 {
@@ -629,38 +642,62 @@ def config_from_agent_payload(payload: Any) -> dict[str, Any]:
     cookie = normalize_cookie(_required_string(payload, "wechat_cookie"))
     token = _required_string(payload, "wechat_token")
     _warn_credential_shape(cookie, token)
-    config = deepcopy(DEFAULT_CONFIG)
+    config = deepcopy(existing) if existing is not None else deepcopy(DEFAULT_CONFIG)
     config["wechat"] = {
         "cookie": cookie,
         "token": token,
     }
-    config["subscriptions"] = _normalize_subscriptions(payload.get("subscriptions"))
-    config["feishu"] = feishu
-    if "settings" in payload:
-        config["settings"] = _normalize_settings(payload["settings"], partial=True)
-        config["setup"]["search_window_confirmed"] = (
-            "check_hours" in payload["settings"]
+    if "subscriptions" in payload:
+        config["subscriptions"] = _normalize_subscriptions(
+            payload.get("subscriptions")
         )
+        config["health"]["subscriptions"] = deepcopy(
+            DEFAULT_CONFIG["health"]["subscriptions"]
+        )
+    elif existing is None:
+        # First-time setup still requires a non-empty subscription list.
+        config["subscriptions"] = _normalize_subscriptions(
+            payload.get("subscriptions")
+        )
+    config["feishu"] = feishu
+    if "feishu" in payload:
+        _record_feishu_identity_choice(config, payload["feishu"])
+        if previous_feishu is not None:
+            invalidate_for_feishu_change(config, previous_feishu, config["feishu"])
+    if "settings" in payload:
+        config["settings"] = _normalize_settings(
+            payload["settings"], partial=True, existing=config["settings"]
+        )
+        if "check_hours" in payload["settings"]:
+            config["setup"]["search_window_confirmed"] = True
     if "preferences" in payload:
         config["preferences"] = _normalize_preferences(
-            payload["preferences"], partial=True
+            payload["preferences"],
+            partial=True,
+            existing=config["preferences"],
         )
     if "execution_policy" in payload:
         config["setup"]["execution_policy"] = _normalize_execution_policy(
-            payload["execution_policy"], partial=True
+            payload["execution_policy"],
+            partial=True,
+            existing=config["setup"]["execution_policy"],
         )
-    if "feishu" in payload:
-        _record_feishu_identity_choice(config, payload["feishu"])
     return validate_config(config, require_wechat=True)
 
 
-def _normalize_settings(value: Any, *, partial: bool) -> dict[str, Any]:
+def _normalize_settings(
+    value: Any, *, partial: bool, existing: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError("settings must be an object")
     unexpected = set(value) - SETTINGS_INPUT_KEYS
     if unexpected:
         raise ConfigError(f"settings contains unsupported keys: {sorted(unexpected)}")
-    normalized = deepcopy(DEFAULT_CONFIG["settings"])
+    normalized = (
+        deepcopy(existing)
+        if partial and existing is not None
+        else deepcopy(DEFAULT_CONFIG["settings"])
+    )
     if partial:
         normalized.update(value)
     else:
@@ -668,13 +705,19 @@ def _normalize_settings(value: Any, *, partial: bool) -> dict[str, Any]:
     return normalized
 
 
-def _normalize_preferences(value: Any, *, partial: bool) -> dict[str, Any]:
+def _normalize_preferences(
+    value: Any, *, partial: bool, existing: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError("preferences must be an object")
     unexpected = set(value) - PREFERENCES_INPUT_KEYS
     if unexpected:
         raise ConfigError(f"preferences contains unsupported keys: {sorted(unexpected)}")
-    normalized = deepcopy(DEFAULT_CONFIG["preferences"]) if partial else {}
+    normalized = (
+        deepcopy(existing)
+        if partial and existing is not None
+        else (deepcopy(DEFAULT_CONFIG["preferences"]) if partial else {})
+    )
     normalized.update(value)
     return normalized
 
@@ -755,8 +798,17 @@ def _save_agent_raw(raw: str, *, section: str = "full", json_output: bool = Fals
     try:
         payload = json.loads(raw.lstrip("\ufeff"))
         if section == "full":
-            config = config_from_agent_payload(payload)
-            path = save_config(config)
+            try:
+                config = modify_config(
+                    lambda current: config_from_agent_payload(payload, existing=current)
+                )
+            except ConfigError as exc:
+                if "configuration not found" not in str(exc):
+                    raise
+                # First-time setup: no existing config to merge, build from defaults.
+                config = config_from_agent_payload(payload)
+                save_config(config)
+            path = config_path()
         else:
             config = modify_config(
                 lambda current: _apply_section_patch(current, section, payload)

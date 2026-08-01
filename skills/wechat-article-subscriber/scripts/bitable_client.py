@@ -1023,7 +1023,7 @@ def create_standard_base(
     # lark-cli reads @file with a path relative to its working directory, and
     # inline JSON breaks under Windows cmd quoting. Write the bounded schema to
     # the CLI work directory and reference it by bare filename.
-    fields_path = lark_cli_work_dir() / "base-fields.json"
+    fields_path = lark_cli_work_dir() / f"base-fields-{os.getpid()}.json"
     fields_path.write_text(fields_json, encoding="utf-8")
     arguments = [
         "base",

@@ -129,7 +129,7 @@ rollback() {
   if [ -n "$VENV_STAGE" ] && [ -e "$VENV_STAGE" ]; then rm -rf -- "$VENV_STAGE"; fi
 }
 
-if [ "$TARGET" = "all" ]; then TARGETS=(agents codex claude copilot); else TARGETS=("$TARGET"); fi
+if [ "$TARGET" = "all" ]; then TARGETS=(agents codex claude copilot openclaw hermes); else TARGETS=("$TARGET"); fi
 VENV_STAGE=""
 VENV_DIR=""
 VENV_BACKUP=""

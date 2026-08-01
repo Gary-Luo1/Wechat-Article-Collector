@@ -123,7 +123,7 @@ function Prepare-Skill([string]$Kind) {
     }
 }
 
-$targets = if ($Target -eq "all") { @("agents", "codex", "claude", "copilot") } else { @($Target) }
+$targets = if ($Target -eq "all") { @("agents", "codex", "claude", "copilot", "openclaw", "hermes") } else { @($Target) }
 $prepared = @()
 $venvStage = $null
 $venvDir = $null

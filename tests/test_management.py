@@ -135,6 +135,105 @@ def test_full_agent_setup_does_not_silently_skip_feishu(
     assert load_config()["feishu"]["destination"] == "undecided"
 
 
+def test_full_agent_setup_rerun_preserves_confirmed_policy_and_feishu(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import init_config
+    from config_store import load_config
+
+    first = {
+        "wechat_cookie": "complete-cookie",
+        "wechat_token": "123",
+        "subscriptions": ["Example"],
+        "feishu": {
+            "destination": "existing",
+            "enabled": True,
+            "base_token": "bt-secret",
+            "table_id": "tb-1",
+            "binding_mode": "agent",
+            "agent_source": "openclaw",
+        },
+        "execution_policy": {
+            "mode": "autopilot",
+            "confirmed": True,
+            "unlisted_publisher": "auto_subscribe",
+            "allow_feishu_sync": True,
+        },
+        "settings": {"check_hours": 24},
+    }
+    monkeypatch.setattr(
+        init_config.sys, "stdin", io.StringIO(json.dumps(first))
+    )
+    assert init_config.main(["--agent-stdin", "--format", "json"]) == 0
+    assert load_config()["setup"]["execution_policy"]["confirmed"] is True
+    assert load_config()["feishu"]["base_token"] == "bt-secret"
+
+    # Host re-runs the full setup without repeating feishu / execution_policy:
+    # previously the whole config was rebuilt from defaults and the confirmed
+    # policy plus Feishu binding were silently reset.
+    rerun = {
+        "wechat_cookie": "complete-cookie",
+        "wechat_token": "123",
+        "subscriptions": ["Example"],
+    }
+    monkeypatch.setattr(
+        init_config.sys, "stdin", io.StringIO(json.dumps(rerun))
+    )
+    assert init_config.main(["--agent-stdin", "--format", "json"]) == 0
+    saved = load_config()
+    assert saved["setup"]["execution_policy"]["confirmed"] is True
+    assert saved["setup"]["execution_policy"]["mode"] == "autopilot"
+    assert saved["feishu"]["enabled"] is True
+    assert saved["feishu"]["destination"] == "existing"
+    assert saved["feishu"]["base_token"] == "bt-secret"
+    assert saved["feishu"]["table_id"] == "tb-1"
+    assert saved["settings"]["check_hours"] == 24
+
+
+def test_full_agent_setup_partial_sections_merge_into_existing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import init_config
+    from config_store import load_config
+
+    first = {
+        "wechat_cookie": "complete-cookie",
+        "wechat_token": "123",
+        "subscriptions": ["Example"],
+        "feishu": {"destination": "skip"},
+        "execution_policy": {
+            "mode": "autopilot",
+            "confirmed": True,
+            "unlisted_publisher": "auto_subscribe",
+        },
+        "settings": {"check_hours": 24, "output_language": "zh"},
+    }
+    monkeypatch.setattr(
+        init_config.sys, "stdin", io.StringIO(json.dumps(first))
+    )
+    assert init_config.main(["--agent-stdin", "--format", "json"]) == 0
+
+    # Re-run full setup sending only one settings key and a policy mode change:
+    # omitted settings / policy fields must survive (merge semantics).
+    rerun = {
+        "wechat_cookie": "complete-cookie",
+        "wechat_token": "123",
+        "subscriptions": ["Example"],
+        "execution_policy": {"mode": "guided", "unlisted_publisher": "ask"},
+        "settings": {"check_hours": 12},
+    }
+    monkeypatch.setattr(
+        init_config.sys, "stdin", io.StringIO(json.dumps(rerun))
+    )
+    assert init_config.main(["--agent-stdin", "--format", "json"]) == 0
+    saved = load_config()
+    assert saved["settings"]["check_hours"] == 12
+    assert saved["settings"]["output_language"] == "zh"
+    assert saved["setup"]["execution_policy"]["mode"] == "guided"
+    assert saved["setup"]["execution_policy"]["confirmed"] is True
+    assert saved["setup"]["execution_policy"]["unlisted_publisher"] == "ask"
+
+
 def test_setup_guide_manual_template_is_loadable(capsys):
     import init_config
     from config_store import load_config
