@@ -58,7 +58,7 @@ def build(output_dir: Path) -> tuple[Path, Path]:
             bundle.writestr(info, path.read_bytes(), compresslevel=9)
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     checksum_path = archive.with_suffix(".zip.sha256")
-    checksum_path.write_text(f"{checksum}  {archive.name}\n", encoding="ascii", newline="\n")
+    checksum_path.write_bytes(f"{checksum}  {archive.name}\n".encode("ascii"))
     return archive, checksum_path
 
 

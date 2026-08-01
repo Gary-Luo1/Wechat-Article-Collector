@@ -37,6 +37,12 @@ from config_store import (
     update_health,
     validate_config,
 )
+from execution_policy import (
+    allows_automatic_provisioning,
+    invalidate_policy,
+    next_stage,
+    policy_for,
+)
 from paths import config_path, data_dir, lock_path, queue_path, venv_dir
 from lark_runtime import (
     discover_global_lark_profiles,
@@ -94,36 +100,6 @@ ACTION_LABELS = {
 
 def _authorization(config: dict[str, Any]) -> dict[str, Any]:
     return config["setup"]["feishu_authorization"]
-
-
-def _execution_policy(config: dict[str, Any]) -> dict[str, Any]:
-    return config["setup"]["execution_policy"]
-
-
-def _invalidate_execution_policy(config: dict[str, Any]) -> None:
-    policy = _execution_policy(config)
-    policy["confirmed"] = False
-    policy["allow_feishu_provisioning"] = False
-    policy["provision_base_name"] = ""
-    policy["provision_table_name"] = ""
-    policy["allow_feishu_sync"] = False
-    policy["approved_at"] = ""
-
-
-def _policy_allows_automatic_provisioning(
-    config: dict[str, Any], *, base_name: str, table_name: str
-) -> bool:
-    policy = _execution_policy(config)
-    return bool(
-        policy["confirmed"]
-        and policy["mode"] == "autopilot"
-        and config["feishu"]["destination"] == "create"
-        and policy["allow_feishu_provisioning"]
-        and policy["provision_base_name"] == base_name
-        and policy["provision_table_name"] == table_name
-        and not config["feishu"]["base_token"]
-        and not config["feishu"]["table_id"]
-    )
 
 
 def _reset_authorization(config: dict[str, Any], identity: str) -> None:
@@ -187,7 +163,7 @@ def _progress(
                 ),
                 (
                     "execution_policy",
-                    bool(_execution_policy(config)["confirmed"]),
+                    bool(policy_for(config)["confirmed"]),
                     False,
                 ),
             ]
@@ -253,61 +229,7 @@ def _progress(
     }
 
 
-def _next_stage(config: dict[str, Any], *, cli: dict[str, Any] | None = None) -> tuple[str, str]:
-    if not config["wechat"]["cookie"].strip() or not config["wechat"]["token"].strip():
-        return "wechat_credentials_missing", "ask_user_to_choose_chat_or_local_file"
-    wechat_health = config["health"]["wechat"]
-    if wechat_health["consecutive_failures"]:
-        if wechat_health["last_failure_kind"] in {
-            "WeChatCookieExpired",
-            "WeChatTokenExpired",
-            "WeChatCredentialContextError",
-        }:
-            return "wechat_credentials_expired", "ask_user_to_choose_chat_or_local_file"
-        return "wechat_validation_failed", "run_online_doctor"
-    if not wechat_health["last_verified_at"]:
-        return "wechat_unverified", "run_online_doctor"
-    if not config["setup"]["search_window_confirmed"]:
-        return "search_window_unconfirmed", "ask_user_for_search_window"
-    if not config["subscriptions"]:
-        return "subscriptions_missing", "ask_for_subscription_names"
-    if any(not str(item.get("biz", "")).strip() for item in config["subscriptions"]):
-        return "subscriptions_unresolved", "resolve_and_confirm_subscriptions"
-    destination = config["feishu"]["destination"]
-    if destination == "undecided":
-        return "feishu_destination_unconfirmed", "ask_user_for_feishu_destination"
-    policy = _execution_policy(config)
-    if not policy["confirmed"]:
-        return "execution_policy_unconfirmed", "review_and_confirm_execution_policy"
-    if destination == "skip":
-        return "ready_wechat_only", "discover_articles"
-    if not config["setup"]["feishu_identity_confirmed"]:
-        return "feishu_identity_unconfirmed", "ask_feishu_identity_before_authorization"
-    if cli is None:
-        return "feishu_cli_missing_or_unchecked", "check_or_install_lark_cli"
-    if not cli.get("compatible"):
-        return "feishu_cli_incompatible", "install_compatible_lark_cli"
-    authorization = _authorization(config)
-    if config["feishu"]["identity"] == "user" and authorization["state"] != "authorized":
-        if authorization["state"] == "waiting":
-            return "feishu_authorization_waiting", "resume_existing_user_base_authorization"
-        return "feishu_authorization_required", "run_feishu_auth_start"
-    if (
-        config["feishu"]["identity"] == "bot"
-        and policy["allow_feishu_provisioning"]
-        and not config["feishu"]["manager_open_id"]
-    ):
-        return "feishu_manager_missing", "resolve_and_save_feishu_manager"
-    if not (config["feishu"]["base_token"] and config["feishu"]["table_id"]):
-        if destination == "create":
-            return "feishu_target_pending", "provision_configured_feishu_base"
-        return "feishu_target_missing", "configure_existing_feishu_target"
-    feishu_health = config["health"]["feishu"]
-    if feishu_health["consecutive_failures"]:
-        return "feishu_validation_failed", "authorize_and_run_feishu_check"
-    if not feishu_health["last_verified_at"]:
-        return "feishu_unverified", "authorize_and_run_feishu_check"
-    return "ready", "discover_articles"
+_next_stage = next_stage
 
 
 def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
@@ -501,7 +423,7 @@ def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
     if destination == "skip":
         config["feishu"]["enabled"] = False
     if previous != destination:
-        _invalidate_execution_policy(config)
+        invalidate_policy(config)
     save_config(config)
     next_action = (
         "review_and_confirm_execution_policy"
@@ -608,7 +530,7 @@ def _import_feishu_host_context() -> tuple[dict[str, Any], str]:
     changed = previous_scope != current_scope
     if changed:
         config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
-        _invalidate_execution_policy(config)
+        invalidate_policy(config)
     save_config(config)
     return {
         "source": source,
@@ -754,7 +676,7 @@ def _feishu_identity(identity: str) -> dict[str, Any]:
     if previous != identity or not was_confirmed:
         config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
         _reset_authorization(config, identity)
-        _invalidate_execution_policy(config)
+        invalidate_policy(config)
     save_config(config)
     return {
         "identity": identity,
@@ -785,7 +707,7 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
     if previous != normalized:
         config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
         _reset_authorization(config, config["feishu"]["identity"])
-        _invalidate_execution_policy(config)
+        invalidate_policy(config)
         config["feishu"].update(
             {
                 "enabled": False,
@@ -937,7 +859,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         "transport": "native lark-cli binary with an argv array; no shell JSON",
         "global_profiles_modified": False,
     }
-    policy_authorized = _policy_allows_automatic_provisioning(
+    policy_authorized = allows_automatic_provisioning(
         config,
         base_name=arguments.name,
         table_name=arguments.table_name,
@@ -1033,7 +955,7 @@ def _feishu_manager(open_id: str) -> dict[str, Any]:
     previous = str(config["feishu"].get("manager_open_id") or "")
     config["feishu"]["manager_open_id"] = normalized
     if previous != normalized:
-        _invalidate_execution_policy(config)
+        invalidate_policy(config)
     save_config(config)
     return {
         "manager_configured": True,
@@ -1048,7 +970,7 @@ def _execution_policy_command(
     config = load_config()
     if arguments.policy_command == "show":
         return {
-            "policy": deepcopy(_execution_policy(config)),
+            "policy": deepcopy(policy_for(config)),
             "allowed_when_confirmed": [
                 "routine discovery, reading, scoring, queueing, and export",
                 "the configured unlisted-publisher behavior",

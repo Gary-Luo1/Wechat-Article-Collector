@@ -26,3 +26,12 @@ def test_github_source_archive_is_clean_and_self_verifying(tmp_path: Path):
         for line in manifest:
             expected, relative = line.split("  ", 1)
             assert hashlib.sha256(bundle.read(prefix + relative)).hexdigest() == expected
+
+
+def test_portable_release_archive_has_a_checksum(tmp_path: Path):
+    from tools.package_release import build
+
+    archive, checksum = build(tmp_path)
+
+    assert archive.is_file()
+    assert checksum.read_text(encoding="ascii").endswith(f"  {archive.name}\n")

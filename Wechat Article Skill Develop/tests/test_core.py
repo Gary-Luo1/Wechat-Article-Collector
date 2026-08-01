@@ -31,6 +31,24 @@ def article(letter: str, *, query: str = "") -> dict:
     }
 
 
+def test_feishu_target_owns_cli_check_preflight_and_sync_calls():
+    from feishu_target import FeishuTarget
+
+    calls: list[tuple] = []
+    target = FeishuTarget(
+        {"enabled": True, "identity": "bot"},
+        cli_info=lambda: {"compatible": True, "version": "1.0.69"},
+        preflight=lambda feishu: calls.append(("preflight", feishu)) or {"mapping": {}},
+        upsert=lambda feishu, article, metadata, dry_run: calls.append(
+            ("upsert", feishu, article, metadata, dry_run)
+        ),
+    )
+
+    assert target.check() == {"mapping": {}}
+    target.sync({"title": "Article"}, {"score": 8.0}, dry_run=True)
+    assert [call[0] for call in calls] == ["preflight", "upsert"]
+
+
 class TestConfig:
     def test_save_load_and_defaults(self):
         from config_store import load_config, save_config
@@ -316,6 +334,22 @@ class TestQueue:
         assert "Traceback" not in result.stderr
         assert "queue is invalid" in result.stderr
         assert list(queue_path().parent.glob("queue.corrupt.*.json"))
+
+
+def test_article_inbox_query_returns_local_state_without_cli_arguments():
+    from queue_helpers import add_pending, complete_article
+
+    add_pending([article("pending"), article("processed")])
+    complete_article(article("processed")["link"], {"score": 8}, sync_status="pending")
+
+    from article_inbox import query_inbox
+
+    result = query_inbox(status="all", sort="oldest", limit=10)
+
+    assert result["summary"]["pending"] == 1
+    assert result["summary"]["processed"] == 1
+    assert result["summary"]["sync_pending"] == 1
+    assert [item["status"] for item in result["items"]] == ["pending", "processed"]
 
 
 class TestScoring:
@@ -1260,6 +1294,34 @@ def test_runtime_can_use_ready_system_python(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(runtime.subprocess, "run", mock.Mock(return_value=completed))
     assert runtime.main(["process", "--help"]) == 0
     assert runtime.subprocess.run.call_args.args[0][0] == str(Path(runtime.sys.executable))
+
+
+def test_queue_only_process_command_does_not_require_article_parser(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    import builtins
+    import importlib
+
+    original_import = builtins.__import__
+    sys.modules.pop("process_pending", None)
+    sys.modules.pop("article_reader", None)
+
+    def block_article_reader(name, *args, **kwargs):
+        if name == "article_reader":
+            raise ModuleNotFoundError("article parser is unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", block_article_reader)
+    process_pending = importlib.import_module("process_pending")
+
+    assert process_pending.main(["list"]) == 0
+    assert "No pending articles" in capsys.readouterr().out
+
+
+def test_runtime_allows_local_process_commands_without_article_dependencies():
+    import runtime
+
+    assert runtime._system_runtime_is_ready("process") is True
 
 
 def test_runtime_venv_follows_state_override():

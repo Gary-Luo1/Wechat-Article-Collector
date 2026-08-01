@@ -466,6 +466,36 @@ def test_execution_policy_rejects_undecided_feishu_destination(capsys):
     assert "choose the Feishu destination" in payload["error"]["message"]
 
 
+def test_execution_policy_invalidates_only_when_feishu_approval_scope_changes():
+    from config_store import DEFAULT_CONFIG
+    from execution_policy import invalidate_for_feishu_change
+
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
+    policy = config["setup"]["execution_policy"]
+    policy.update(
+        {
+            "confirmed": True,
+            "mode": "autopilot",
+            "allow_feishu_provisioning": True,
+            "provision_base_name": "Articles",
+            "provision_table_name": "Inbox",
+            "allow_feishu_sync": True,
+            "approved_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    previous = dict(config["feishu"])
+
+    assert invalidate_for_feishu_change(config, previous, dict(previous)) is False
+    assert policy["confirmed"] is True
+
+    updated = {**previous, "manager_open_id": "ou_changed"}
+    assert invalidate_for_feishu_change(config, previous, updated) is True
+    assert policy["confirmed"] is False
+    assert policy["allow_feishu_provisioning"] is False
+    assert policy["allow_feishu_sync"] is False
+    assert policy["approved_at"] == ""
+
+
 def test_feishu_identity_change_invalidates_execution_policy(capsys):
     import manage
     from config_store import load_config, save_config
@@ -1219,6 +1249,16 @@ def test_subscription_resolution_reports_ambiguity_without_guessing():
     result = resolve_subscriptions(config, api=API(), save=False)
     assert result[0]["status"] == "ambiguous"
     assert "biz" not in config["subscriptions"][0]
+
+
+def test_subscription_resolution_matches_aliases_and_biz_consistently():
+    from subscription_resolution import matches_subscription
+
+    subscriptions = [{"name": "Example Account", "alias": "Example", "biz": "Biz_123"}]
+
+    assert matches_subscription(subscriptions, "  example  ", "") is True
+    assert matches_subscription(subscriptions, "Different publisher", "biz_123") is True
+    assert matches_subscription(subscriptions, "Different publisher", "biz_456") is False
 
 
 def test_process_json_failure_is_structured(capsys):

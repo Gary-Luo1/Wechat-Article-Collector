@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Mapping
 
 
@@ -46,10 +47,11 @@ def validate_scores(scores: Mapping[str, float]) -> dict[str, float]:
 
 def calculate_score(scores: Mapping[str, float]) -> float:
     validated = validate_scores(scores)
-    return round(
-        sum(validated[name] * details["weight"] for name, details in SCORING_DIMENSIONS.items()),
-        1,
+    total = sum(
+        Decimal(str(validated[name])) * Decimal(str(details["weight"]))
+        for name, details in SCORING_DIMENSIONS.items()
     )
+    return float(total.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
 
 
 def validate_total_score(score: float) -> float:

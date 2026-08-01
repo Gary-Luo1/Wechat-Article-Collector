@@ -5,15 +5,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from datetime import datetime
 import io
 import json
 import logging
 from pathlib import Path
-import time
 from typing import Any
 
-from article_reader import canonicalize_wechat_article_url, fetch_article, fetch_article_text
+from article_inbox import plan_digest, query_inbox
 from bitable_client import (
     LarkCLIError,
     lark_cli_info,
@@ -22,6 +20,8 @@ from bitable_client import (
     upsert_article,
 )
 from config_store import DEFAULT_CONFIG, ConfigError, load_config, save_config, update_health
+from execution_policy import autopilot_policy
+from feishu_target import FeishuTarget
 from protocol import dump, failure, success
 from queue_helpers import (
     cleanup_processed,
@@ -43,9 +43,40 @@ from scoring_rubric import (
     is_advertisement,
     should_sync,
 )
+from subscription_resolution import matches_subscription
 
 
 logger = logging.getLogger("wechat-process")
+
+
+def build_feishu_target(feishu: dict[str, Any]) -> FeishuTarget:
+    """Construct the production target while keeping CLI handlers testable."""
+    return FeishuTarget(
+        feishu,
+        cli_info=lark_cli_info,
+        preflight=preflight_feishu,
+        upsert=lambda target, article, metadata, dry_run: upsert_article(
+            target, article, metadata, dry_run=dry_run
+        ),
+    )
+
+
+def canonicalize_wechat_article_url(url: str) -> str:
+    from article_reader import canonicalize_wechat_article_url as canonicalize
+
+    return canonicalize(url)
+
+
+def fetch_article(url: str, **kwargs: Any) -> dict[str, Any]:
+    from article_reader import fetch_article as fetch
+
+    return fetch(url, **kwargs)
+
+
+def fetch_article_text(url: str, **kwargs: Any) -> str:
+    from article_reader import fetch_article_text as fetch
+
+    return fetch(url, **kwargs)
 
 
 class ArticlePublisherUnknown(ValueError):
@@ -86,140 +117,17 @@ def cmd_list(account: str | None = None) -> int:
     return 0
 
 
-def _inbox_timestamp(item: dict[str, Any]) -> float:
-    article = item["article"]
-    try:
-        published = float(article.get("update_time") or 0)
-    except (TypeError, ValueError):
-        published = 0
-    if published:
-        return published
-    for key in ("processed_at", "discovered_at"):
-        value = item.get(key) or article.get(key)
-        if value:
-            try:
-                return datetime.fromisoformat(str(value)).timestamp()
-            except ValueError:
-                continue
-    return 0
-
-
-def _inbox(arguments: argparse.Namespace) -> dict[str, Any]:
-    queue = read_queue()
-    items: list[dict[str, Any]] = []
-    if arguments.status in {"pending", "all"}:
-        items.extend(
-            {
-                "status": "pending",
-                "pending_index": index,
-                "article": article,
-                "discovered_at": article.get("discovered_at", ""),
-                "favorite": bool(article.get("favorite", False)),
-                "inbox_state": str(article.get("inbox_state", "active")),
-            }
-            for index, article in enumerate(queue["pending"], start=1)
-        )
-    if arguments.status in {"processed", "all"}:
-        items.extend(
-            {
-                "status": "processed",
-                "article": entry["article"],
-                "processed_at": entry.get("processed_at", ""),
-                "sync_status": entry.get("sync_status", ""),
-                "score": entry.get("metadata", {}).get("score"),
-                "summary": entry.get("metadata", {}).get("summary", ""),
-                "tags": entry.get("metadata", {}).get("tags", []),
-                "favorite": bool(entry["article"].get("favorite", False)),
-                "inbox_state": str(entry["article"].get("inbox_state", "active")),
-                "disposition": str(entry.get("metadata", {}).get("disposition", "completed")),
-            }
-            for entry in queue["processed"].values()
-            if isinstance(entry, dict) and isinstance(entry.get("article"), dict)
-        )
-    account = str(arguments.account or "").strip().casefold()
-    query = " ".join(str(arguments.query or "").split()).casefold()
-    selected: list[dict[str, Any]] = []
-    for item in items:
-        article = item["article"]
-        if arguments.favorite and not item["favorite"]:
-            continue
-        if (
-            item["status"] == "pending"
-            and arguments.state != "all"
-            and item["inbox_state"] != arguments.state
-        ):
-            continue
-        if (
-            item["status"] == "processed"
-            and arguments.disposition != "all"
-            and item["disposition"] != arguments.disposition
-        ):
-            continue
-        if account and str(article.get("account", "")).strip().casefold() != account:
-            continue
-        searchable = " ".join(
-            [
-                str(article.get("title", "")),
-                str(article.get("account", "")),
-                str(article.get("digest", "")),
-                str(item.get("summary", "")),
-                " ".join(str(tag) for tag in item.get("tags", [])),
-            ]
-        ).casefold()
-        if query and query not in searchable:
-            continue
-        selected.append(item)
-    selected.sort(
-        key=_inbox_timestamp,
-        reverse=arguments.sort == "newest",
-    )
-    matched = len(selected)
-    selected = selected[: arguments.limit]
-    return {
-        "summary": {
-            "pending": len(queue["pending"]),
-            "processed": len(queue["processed"]),
-            "favorites": sum(
-                bool(article.get("favorite", False)) for article in queue["pending"]
-            )
-            + sum(
-                bool(entry.get("article", {}).get("favorite", False))
-                for entry in queue["processed"].values()
-                if isinstance(entry, dict)
-            ),
-            "later": sum(
-                article.get("inbox_state", "active") == "later"
-                for article in queue["pending"]
-            ),
-            "dismissed": sum(
-                entry.get("metadata", {}).get("disposition") == "dismissed"
-                for entry in queue["processed"].values()
-                if isinstance(entry, dict)
-            ),
-            "sync_pending": sum(
-                entry.get("sync_status") == "pending"
-                for entry in queue["processed"].values()
-                if isinstance(entry, dict)
-            ),
-            "matched": matched,
-            "returned": len(selected),
-        },
-        "filters": {
-            "status": arguments.status,
-            "account": arguments.account or "",
-            "query": arguments.query or "",
-            "sort": arguments.sort,
-            "limit": arguments.limit,
-            "favorite": bool(arguments.favorite),
-            "state": arguments.state,
-            "disposition": arguments.disposition,
-        },
-        "items": selected,
-    }
-
-
 def cmd_inbox(arguments: argparse.Namespace) -> int:
-    result = _inbox(arguments)
+    result = query_inbox(
+        status=arguments.status,
+        account=arguments.account or "",
+        query=arguments.query or "",
+        sort=arguments.sort,
+        limit=arguments.limit,
+        favorite=arguments.favorite,
+        state=arguments.state,
+        disposition=arguments.disposition,
+    )
     if arguments.format == "json":
         print(json.dumps(result, ensure_ascii=False))
         return 0
@@ -284,78 +192,12 @@ def _digest_plan(arguments: argparse.Namespace) -> dict[str, Any]:
         preferences = dict(DEFAULT_CONFIG["preferences"])
     hours = arguments.hours if arguments.hours is not None else preferences["digest_hours"]
     limit = arguments.limit if arguments.limit is not None else preferences["digest_limit"]
-    if hours < 1 or hours > 8760:
-        raise ValueError("--hours must be between 1 and 8760")
-    if limit < 1 or limit > 50:
-        raise ValueError("--limit must be between 1 and 50")
-    cutoff = time.time() - hours * 3600
-    include_topics = [value.casefold() for value in preferences["include_topics"]]
-    exclude_keywords = [value.casefold() for value in preferences["exclude_keywords"]]
-    preferred_accounts = {
-        value.casefold() for value in preferences["preferred_accounts"]
-    }
-    candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    excluded = {"too_old": 0, "later": 0, "keyword": 0}
-    for article in get_pending():
-        state = str(article.get("inbox_state", "active"))
-        if state == "later" and not arguments.include_later:
-            excluded["later"] += 1
-            continue
-        item = {"article": article, "discovered_at": article.get("discovered_at", "")}
-        timestamp = _inbox_timestamp(item)
-        if timestamp and timestamp < cutoff:
-            excluded["too_old"] += 1
-            continue
-        searchable = " ".join(
-            str(article.get(key, "")) for key in ("title", "digest", "account")
-        ).casefold()
-        blocked = [keyword for keyword in exclude_keywords if keyword in searchable]
-        if blocked:
-            excluded["keyword"] += 1
-            continue
-        topic_matches = [topic for topic in include_topics if topic in searchable]
-        account = str(article.get("account", "")).strip()
-        preferred_account = account.casefold() in preferred_accounts
-        favorite = bool(article.get("favorite", False))
-        reasons = []
-        if favorite:
-            reasons.append("favorite")
-        if preferred_account:
-            reasons.append("preferred_account")
-        if topic_matches:
-            reasons.append("topic_match")
-        rank = (favorite, preferred_account, len(topic_matches), timestamp)
-        candidates.append(
-            (
-                rank,
-                {
-                    "title": str(article.get("title", "")),
-                    "account": account,
-                    "link": str(article.get("link", "")),
-                    "url": str(article.get("link", "")),
-                    "published_at": article.get("update_time", 0),
-                    "favorite": favorite,
-                    "inbox_state": state,
-                    "matched_topics": topic_matches,
-                    "selection_reasons": reasons or ["recent"],
-                },
-            )
-        )
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    selected = [item for _, item in candidates[:limit]]
-    return {
-        "window_hours": hours,
-        "limit": limit,
-        "include_later": bool(arguments.include_later),
-        "preferences": preferences,
-        "eligible": len(candidates),
-        "returned": len(selected),
-        "excluded": excluded,
-        "candidates": selected,
-        "content_fetched": False,
-        "articles_completed": False,
-        "feishu_written": False,
-    }
+    return plan_digest(
+        preferences,
+        hours=hours,
+        limit=limit,
+        include_later=arguments.include_later,
+    )
 
 
 def cmd_digest_plan(arguments: argparse.Namespace) -> int:
@@ -408,28 +250,6 @@ def cmd_batch_read(limit: int) -> int:
     return 0
 
 
-def _subscription_matches(config: dict[str, Any], account: str, account_id: str) -> bool:
-    account_key = " ".join(account.split()).casefold()
-    account_id_key = account_id.strip().casefold()
-    for subscription in config["subscriptions"]:
-        names = {
-            " ".join(str(subscription.get(key, "")).split()).casefold()
-            for key in ("name", "alias")
-            if str(subscription.get(key, "")).strip()
-        }
-        biz = str(subscription.get("biz", "")).strip().casefold()
-        if account_key in names or (account_id_key and biz == account_id_key):
-            return True
-    return False
-
-
-def _autopilot_policy(config: dict[str, Any]) -> dict[str, Any] | None:
-    policy = config["setup"]["execution_policy"]
-    if policy["confirmed"] and policy["mode"] == "autopilot":
-        return policy
-    return None
-
-
 def cmd_ingest(arguments: argparse.Namespace) -> int:
     url = canonicalize_wechat_article_url(arguments.url)
     document = fetch_article(url)
@@ -454,14 +274,14 @@ def cmd_ingest(arguments: argparse.Namespace) -> int:
         raise ArticlePublisherUnknown(details)
     config = load_config()
     account_id = str(document.get("account_id", ""))
-    subscribed = _subscription_matches(config, account, account_id)
+    subscribed = matches_subscription(config["subscriptions"], account, account_id)
     subscribe_requested = bool(arguments.subscribe)
     no_subscribe_requested = bool(arguments.no_subscribe)
     decision_source = "current_command" if (
         subscribe_requested or no_subscribe_requested
     ) else "existing_subscription"
     if not subscribed and not subscribe_requested and not no_subscribe_requested:
-        policy = _autopilot_policy(config)
+        policy = autopilot_policy(config)
         publisher_policy = (
             policy["unlisted_publisher"] if policy is not None else "ask"
         )
@@ -558,11 +378,8 @@ def _sync_entry(entry: dict[str, Any], *, dry_run: bool = False) -> None:
     feishu = config["feishu"]
     if not feishu["enabled"]:
         raise ConfigError("Feishu sync is disabled; complete Agent setup first")
-    upsert_article(
-        feishu,
-        entry["article"],
-        entry["metadata"],
-        dry_run=dry_run,
+    build_feishu_target(feishu).sync(
+        entry["article"], entry["metadata"], dry_run=dry_run
     )
     if not dry_run:
         update_sync_status(entry["article"]["link"], "synced")
@@ -616,7 +433,7 @@ def cmd_done(arguments: argparse.Namespace) -> int:
         if arguments.feishu:
             raise
         config = None
-    policy = _autopilot_policy(config) if config is not None else None
+    policy = autopilot_policy(config) if config is not None else None
     policy_sync = bool(
         config is not None
         and policy is not None
@@ -684,13 +501,7 @@ def cmd_sync_all(*, dry_run: bool = False) -> int:
 def cmd_feishu_check(*, save_mapping: bool = False) -> int:
     config = load_config()
     try:
-        cli = lark_cli_info()
-        if not cli["compatible"]:
-            raise LarkCLIError(
-                f"lark-cli {cli['version']} is outside the supported range >=1.0.69,<2",
-                kind="version",
-            )
-        check = preflight_feishu(config["feishu"])
+        check = build_feishu_target(config["feishu"]).check()
     except Exception as exc:
         try:
             update_health(
@@ -716,7 +527,7 @@ def cmd_feishu_check(*, save_mapping: bool = False) -> int:
                 "note": (
                     "Read-only checks passed. Qualified writes may continue under the "
                     "persisted execution policy."
-                    if _autopilot_policy(config)
+                    if autopilot_policy(config)
                     and config["setup"]["execution_policy"]["allow_feishu_sync"]
                     else (
                         "Read-only checks passed. A real write requires current user "

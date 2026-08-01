@@ -12,6 +12,7 @@ from pathlib import Path
 from config_store import ConfigError, load_config, save_config, update_health
 from protocol import dump, failure, success
 from queue_helpers import add_pending, cleanup_processed, normalize_url, read_queue
+from subscription_resolution import exact_matches, sanitize_candidates, subscription_query
 from wechat_api import (
     WeChatAPI,
     WeChatAPIError,
@@ -44,27 +45,15 @@ def resolve_subscriptions(
         name = str(subscription.get("name", "")).strip()
         alias = str(subscription.get("alias", "")).strip()
         biz = str(subscription.get("biz", "")).strip()
-        query = alias or name
+        query = subscription_query(subscription)
         if biz:
             results.append(
                 {"query": query, "status": "resolved", "name": name, "alias": alias, "biz": biz}
             )
             continue
         candidates = client.search_account(query, count=5)
-        sanitized = [
-            {
-                "name": str(item.get("nickname", "")),
-                "alias": str(item.get("alias", "")),
-                "biz": str(item.get("fakeid", "")),
-            }
-            for item in candidates
-            if isinstance(item, dict)
-        ]
-        exact = [
-            item
-            for item in sanitized
-            if (alias and item["alias"] == alias) or (name and item["name"] == name)
-        ]
+        sanitized = sanitize_candidates(candidates)
+        exact = exact_matches(subscription, sanitized)
         if len(exact) == 1 and exact[0]["biz"]:
             status = "exact"
             if save:

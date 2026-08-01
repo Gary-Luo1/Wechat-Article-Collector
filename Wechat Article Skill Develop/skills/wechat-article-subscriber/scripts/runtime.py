@@ -37,7 +37,7 @@ def _venv_python() -> Path:
 
 
 def _system_runtime_is_ready(command: str) -> bool:
-    if command in {"setup", "manage", "lark"}:
+    if command in {"setup", "manage", "lark", "process"}:
         return True
     try:
         __import__("requests")

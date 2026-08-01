@@ -24,6 +24,7 @@ from config_store import (
     save_config,
     validate_config,
 )
+from execution_policy import invalidate_for_feishu_change
 from paths import config_path, data_dir, secure_write_json
 from protocol import dump, failure, success
 
@@ -517,33 +518,6 @@ def _record_feishu_identity_choice(config: dict[str, Any], value: Any) -> None:
     config["setup"]["feishu_identity_confirmed"] = True
 
 
-def _invalidate_execution_policy_for_feishu_change(config: dict[str, Any]) -> None:
-    policy = config["setup"]["execution_policy"]
-    policy["confirmed"] = False
-    policy["allow_feishu_provisioning"] = False
-    policy["provision_base_name"] = ""
-    policy["provision_table_name"] = ""
-    policy["allow_feishu_sync"] = False
-    policy["approved_at"] = ""
-
-
-def _feishu_approval_scope_changed(
-    previous: dict[str, Any], current: dict[str, Any]
-) -> bool:
-    return any(
-        previous.get(key) != current.get(key)
-        for key in (
-            "destination",
-            "identity",
-            "expected_app_id",
-            "manager_open_id",
-            "base_token",
-            "table_id",
-            "schema_policy",
-        )
-    )
-
-
 def config_from_agent_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ConfigError("Agent configuration must be a JSON object")
@@ -610,8 +584,7 @@ def config_from_feishu_payload(payload: Any) -> dict[str, Any]:
         config["feishu"], _normalize_feishu(payload)
     )
     config["feishu"] = normalized_feishu
-    if _feishu_approval_scope_changed(previous_feishu, normalized_feishu):
-        _invalidate_execution_policy_for_feishu_change(config)
+    invalidate_for_feishu_change(config, previous_feishu, normalized_feishu)
     _record_feishu_identity_choice(config, payload)
     return validate_config(config, require_wechat=True)
 
@@ -666,8 +639,7 @@ def config_from_section_payload(section: str, payload: Any) -> dict[str, Any]:
             config["feishu"], _normalize_feishu(payload)
         )
         config["feishu"] = normalized_feishu
-        if _feishu_approval_scope_changed(previous_feishu, normalized_feishu):
-            _invalidate_execution_policy_for_feishu_change(config)
+        invalidate_for_feishu_change(config, previous_feishu, normalized_feishu)
         _record_feishu_identity_choice(config, payload)
     elif section == "wechat":
         if not isinstance(payload, dict):
