@@ -4,7 +4,7 @@ An open-format Agent Skill that discovers recent WeChat Official Account article
 
 ## Compatibility
 
-The canonical bundle follows the [Agent Skills specification](https://agentskills.io/specification). It is intended for local Agents with Python, shell, filesystem, and network access, including Codex, Claude Code, and GitHub Copilot environments that support skills. Project adapters under `.agents/skills`, `.claude/skills`, and `.github/skills` make a clone discoverable without duplicating the implementation.
+The canonical bundle follows the [Agent Skills specification](https://agentskills.io/specification). It is intended for local Agents with Python, shell, filesystem, and network access, including Codex, Claude Code, GitHub Copilot, OpenClaw, and Hermes environments that support skills. Project adapters under `.agents/skills`, `.claude/skills`, and `.github/skills` make a clone discoverable without duplicating the implementation. Agent-bound Feishu configuration is detected per host from its environment signals (OpenClaw/Hermes/Lark Channel); other hosts select an exact App ID manually.
 
 Cloud or API sandboxes without outbound network access or runtime package installation cannot run the discovery scripts directly. Feishu sync is optional and requires an authenticated `lark-cli` installation.
 
@@ -20,7 +20,12 @@ bash install.sh --target agents
 .\install.ps1 -Target agents
 ```
 
-Available targets are `agents`, `codex`, `claude`, `copilot`, and `all`. Existing installations are moved to a timestamped backup. Python dependencies are installed into an isolated virtual environment, never into the global interpreter.
+Available targets are `agents`, `codex`, `claude`, `copilot`, `openclaw`, `hermes`, and `all` (`openclaw` → `~/.openclaw/skills`, `hermes` → `~/.hermes/skills`). Existing installations are moved to a timestamped backup. Python dependencies are installed into an isolated virtual environment, never into the global interpreter.
+
+On Windows PowerShell 5.1, pipe the configuration JSON through a one-time file
+inbox instead of stdin so Chinese values are not corrupted:
+`setup --prepare-agent-file` → write the JSON with `Out-File -Encoding utf8` →
+`setup --agent-file <path>`. See `references/setup.md` for the exact commands.
 
 Set `WECHAT_SKILL_INSTALL_ROOT` to redirect Agent directories beneath a portable or test root.
 

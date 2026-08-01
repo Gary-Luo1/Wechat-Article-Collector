@@ -1020,6 +1020,11 @@ def create_standard_base(
     # in separate field-create calls, not by growing one Windows command line.
     if len(fields_json.encode("utf-8")) > 8 * 1024:
         raise ValueError("standard field schema is too large for safe Base creation")
+    # lark-cli reads @file with a path relative to its working directory, and
+    # inline JSON breaks under Windows cmd quoting. Write the bounded schema to
+    # the CLI work directory and reference it by bare filename.
+    fields_path = lark_cli_work_dir() / "base-fields.json"
+    fields_path.write_text(fields_json, encoding="utf-8")
     arguments = [
         "base",
         "+base-create",
@@ -1028,15 +1033,18 @@ def create_standard_base(
         "--table-name",
         first_table_name,
         "--fields",
-        fields_json,
+        f"@{fields_path.name}",
         "--as",
         identity,
         "--format",
         "json",
     ]
-    if dry_run:
-        arguments.append("--dry-run")
-    return _run_lark(arguments, retries=1)
+    try:
+        if dry_run:
+            arguments.append("--dry-run")
+        return _run_lark(arguments, retries=1)
+    finally:
+        fields_path.unlink(missing_ok=True)
 
 
 def created_base_identifiers(payload: dict[str, Any]) -> tuple[str, str]:

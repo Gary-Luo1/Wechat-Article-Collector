@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.2.0 - Unreleased
+
+### Added
+
+- Restore and generalize multi-Agent platform adaptation: OpenClaw, Hermes, and
+  Lark Channel are detected from their environment signals and bound with the
+  matching `lark config bind --source`; installers gain `openclaw` and `hermes`
+  targets (`~/.openclaw/skills`, `~/.hermes/skills`).
+- Normalize pasted WeChat Cookies from DevTools table layouts (semicolon,
+  newline, tab, or `name: value` rows) into a canonical header, and flag masked
+  or redacted tokens (e.g. `***`) with targeted guidance instead of a generic
+  shape error.
+- Add a Windows-safe one-time file channel for the trusted Feishu host context
+  (`manage feishu-host-context --agent-file`) alongside the existing
+  `--agent-file` setup inbox, and document the no-pipe PowerShell flow.
+- Self-heal `cli_profile` drift: `manage feishu-context --verify` resolves the
+  real lark-cli profile by App ID for both Agent and manual bindings instead of
+  requiring a config.json edit.
+- Create Feishu Base tables from a bounded `@base-fields.json` file in the CLI
+  work directory instead of inline JSON, avoiding Windows quoting failures.
+
+### Fixed
+
+- Partial `execution_policy` patches no longer reset omitted fields (confirmed,
+  sync approval, unlisted-publisher behavior) to defaults.
+
 ## 2.1.0 - Unreleased
 
 ### Added

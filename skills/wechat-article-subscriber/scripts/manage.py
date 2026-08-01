@@ -404,9 +404,19 @@ def _status() -> tuple[dict[str, Any], str]:
     return data, next_action
 
 
+AGENT_SOURCE_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("openclaw", ("OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_GATEWAY_TOKEN")),
+    ("hermes", ("HERMES_HOME", "HERMES_STATE_DIR")),
+    ("lark-channel", ("LARK_CHANNEL", "LARK_CHANNEL_HOME", "LARK_CHANNEL_APP_ID")),
+)
+
+
 def _detect_agent_source() -> str:
-    signals = ("LARK_CHANNEL", "LARK_CHANNEL_HOME", "LARK_CHANNEL_APP_ID")
-    return "lark-channel" if any(os.environ.get(name) for name in signals) else ""
+    """Return the hosting Agent platform from its environment signals."""
+    for source, names in AGENT_SOURCE_SIGNALS:
+        if any(os.environ.get(name) for name in names):
+            return source
+    return ""
 
 
 def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
@@ -438,12 +448,18 @@ def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
     }, next_action
 
 
-def _import_feishu_host_context() -> tuple[dict[str, Any], str]:
-    if sys.stdin.isatty():
-        raise ValueError(
-            "feishu-host-context --agent-stdin requires trusted host context JSON on stdin"
-        )
-    raw = sys.stdin.read(16 * 1024 + 1)
+def _import_feishu_host_context(
+    arguments: argparse.Namespace,
+) -> tuple[dict[str, Any], str]:
+    agent_file = getattr(arguments, "agent_file", None)
+    if agent_file is not None:
+        raw = Path(agent_file).read_text(encoding="utf-8")
+    else:
+        if sys.stdin.isatty():
+            raise ValueError(
+                "feishu-host-context --agent-stdin requires trusted host context JSON on stdin"
+            )
+        raw = sys.stdin.read(16 * 1024 + 1)
     if len(raw.encode("utf-8")) > 16 * 1024:
         raise ValueError("Feishu host context exceeds the input size limit")
     payload = json.loads(raw.lstrip("\ufeff"))
@@ -455,8 +471,10 @@ def _import_feishu_host_context() -> tuple[dict[str, Any], str]:
             f"Feishu host context contains unsupported keys: {sorted(unexpected)}"
         )
     source = str(payload.get("source") or "").strip().casefold()
-    if source != "lark-channel":
-        raise ValueError("Feishu host context source must be lark-channel")
+    if source not in {"openclaw", "hermes", "lark-channel"}:
+        raise ValueError(
+            "Feishu host context source must be openclaw, hermes, or lark-channel"
+        )
     detected_source = _detect_agent_source()
     if detected_source and detected_source != source:
         raise ValueError(
@@ -550,7 +568,7 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
     current = load_config()
     if not current["setup"]["feishu_identity_confirmed"]:
         source = _detect_agent_source()
-        if source == "lark-channel":
+        if source:
             return {
                 "identity_required": False,
                 "host_bot_context_available": True,
@@ -620,12 +638,36 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
         else:
             current = load_config()
     else:
+        # Existing/dedicated bindings can also drift from lark-cli's real profile
+        # name (e.g. a profile created externally as cli_<app_id>). Resolve by
+        # App ID and self-heal when the profile is discoverable; never error when
+        # the profile is simply not initialized yet.
+        expected_app_id = str(
+            current["feishu"].get("expected_app_id") or ""
+        ).strip()
         profile_resolution = None
+        if expected_app_id:
+            try:
+                profile_resolution = resolve_lark_profile(expected_app_id)
+            except LarkCLIError:
+                profile_resolution = None
+        if (
+            profile_resolution
+            and current["feishu"].get("cli_profile")
+            != profile_resolution["profile"]
+        ):
+            def _set_profile(config: dict[str, Any]) -> dict[str, Any]:
+                config["feishu"]["cli_profile"] = profile_resolution["profile"]
+                return config
+
+            current = modify_config(_set_profile)
+        else:
+            current = load_config()
     context = feishu_identity_context(verify=verify)
     source = _detect_agent_source()
     saved_source = str(current["feishu"].get("agent_source") or "")
     selected_identity = str(current["feishu"].get("identity") or "user")
-    can_bind = source == "lark-channel"
+    can_bind = source in {"openclaw", "hermes", "lark-channel"}
     context.update(
         {
             "agent_source_detected": source,
@@ -641,7 +683,8 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
             ),
             "binding_modes": {
                 "agent": (
-                    "Bind the detected Lark Channel app after explicit confirmation."
+                    "Bind the detected Agent (OpenClaw/Hermes/Lark Channel) app after "
+                    "explicit confirmation."
                     if can_bind
                     else "Unavailable: this Agent does not expose a supported app binding source."
                 ),
@@ -1594,7 +1637,15 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     host_context = commands.add_parser("feishu-host-context")
-    host_context.add_argument("--agent-stdin", action="store_true", required=True)
+    host_sources = host_context.add_mutually_exclusive_group(required=True)
+    host_sources.add_argument(
+        "--agent-stdin", action="store_true", help="read host context JSON from stdin"
+    )
+    host_sources.add_argument(
+        "--agent-file",
+        type=Path,
+        help="read trusted host context JSON from a UTF-8 file (Windows-safe)",
+    )
     context = commands.add_parser("feishu-context")
     context.add_argument("--verify", action="store_true")
     identity = commands.add_parser("feishu-identity")
@@ -1679,7 +1730,7 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "feishu-destination":
             data, next_action = _feishu_destination(arguments.mode)
         elif arguments.command == "feishu-host-context":
-            data, next_action = _import_feishu_host_context()
+            data, next_action = _import_feishu_host_context(arguments)
         elif arguments.command == "feishu-context":
             data, next_action = _feishu_context(verify=arguments.verify)
         elif arguments.command == "feishu-identity":

@@ -101,6 +101,65 @@ def _required_string(payload: dict[str, Any], key: str) -> str:
     return value.strip()
 
 
+def normalize_cookie(raw: str) -> str:
+    """Normalize common DevTools exports into a canonical ``name=value`` Cookie.
+
+    Accepts rows separated by ``;`` or newlines, and per-pair separators of
+    ``=``, a tab, or ``: `` (the clipboard table layout of DevTools Storage).
+    Duplicate names keep their first value; malformed rows are dropped. When no
+    valid pair can be parsed at all (for example a plain value or a synthetic
+    test payload), the original value is preserved unchanged.
+    """
+    text = str(raw).strip()
+    if not text:
+        return text
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for line in text.replace("\r", "\n").split("\n"):
+        for part in line.split(";"):
+            token = part.strip()
+            if not token:
+                continue
+            if token.casefold().startswith("cookie:"):
+                token = token[len("cookie:") :].strip()
+                if not token:
+                    continue
+            name, value = "", ""
+            for separator in ("=", "\t", ": "):
+                if separator in token:
+                    name, value = token.split(separator, 1)
+                    break
+            name = name.strip()
+            value = value.strip().strip('"').strip("'")
+            if not name or not value:
+                continue
+            if name.casefold() in seen:
+                continue
+            seen.add(name.casefold())
+            normalized.append(f"{name}={value}")
+    if not normalized:
+        return text
+    return "; ".join(normalized)
+
+
+def _is_masked_token(token: str) -> bool:
+    stripped = token.strip()
+    lowered = stripped.casefold()
+    return (
+        lowered
+        in {
+            "***",
+            "****",
+            "*****",
+            "<redacted>",
+            "redacted",
+            "[redacted]",
+            "masked",
+        }
+        or bool(stripped and set(stripped) == {"*"})
+    )
+
+
 def _optional_string(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key, "")
     if not isinstance(value, str):
@@ -159,7 +218,13 @@ def _warn_credential_shape(cookie: str, token: str) -> None:
             "https://mp.weixin.qq.com/.",
             ", ".join(missing),
         )
-    if not token.isdigit():
+    if _is_masked_token(token):
+        logging.warning(
+            "WeChat token looks masked or redacted (e.g. ***). Chat retention can "
+            "hide the value; send the raw numeric token again so the real value is "
+            "written to the local config."
+        )
+    elif not token.isdigit():
         logging.warning(
             "WeChat token has an unexpected shape. After signing in at "
             "https://mp.weixin.qq.com/, copy the numeric token query parameter from "
@@ -174,6 +239,7 @@ def credential_shape(cookie: str, token: str) -> dict[str, Any]:
         "complete_cookie_requested": True,
         "missing_diagnostic_keys": sorted(RECOMMENDED_COOKIE_KEYS - names),
         "present_session_key_names": sorted(SESSION_COOKIE_KEYS & names),
+        "token_masked": _is_masked_token(token),
         "token_is_numeric": token.isdigit(),
         "values_echoed": False,
     }
@@ -560,7 +626,7 @@ def config_from_agent_payload(payload: Any) -> dict[str, Any]:
             )
         elif "feishu_base_token" in payload or "feishu_table_id" in payload:
             feishu["destination"] = "skip"
-    cookie = _required_string(payload, "wechat_cookie")
+    cookie = normalize_cookie(_required_string(payload, "wechat_cookie"))
     token = _required_string(payload, "wechat_token")
     _warn_credential_shape(cookie, token)
     config = deepcopy(DEFAULT_CONFIG)
@@ -613,7 +679,9 @@ def _normalize_preferences(value: Any, *, partial: bool) -> dict[str, Any]:
     return normalized
 
 
-def _normalize_execution_policy(value: Any, *, partial: bool) -> dict[str, Any]:
+def _normalize_execution_policy(
+    value: Any, *, partial: bool, existing: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError("execution_policy must be an object")
     unexpected = set(value) - EXECUTION_POLICY_INPUT_KEYS
@@ -621,9 +689,14 @@ def _normalize_execution_policy(value: Any, *, partial: bool) -> dict[str, Any]:
         raise ConfigError(
             f"execution_policy contains unsupported keys: {sorted(unexpected)}"
         )
-    normalized = (
-        deepcopy(DEFAULT_CONFIG["setup"]["execution_policy"]) if partial else {}
-    )
+    if partial and existing is not None:
+        # Partial patches keep every omitted policy field unchanged; rebuilding
+        # from defaults would reset confirmed/sync flags on every patch.
+        normalized = deepcopy(existing)
+    else:
+        normalized = (
+            deepcopy(DEFAULT_CONFIG["setup"]["execution_policy"]) if partial else {}
+        )
     normalized.update(value)
     return normalized
 
@@ -643,7 +716,7 @@ def _apply_section_patch(
         unexpected = set(payload) - {"wechat_cookie", "wechat_token"}
         if unexpected:
             raise ConfigError(f"wechat update contains unsupported keys: {sorted(unexpected)}")
-        cookie = _required_string(payload, "wechat_cookie")
+        cookie = normalize_cookie(_required_string(payload, "wechat_cookie"))
         token = _required_string(payload, "wechat_token")
         _warn_credential_shape(cookie, token)
         config["wechat"] = {"cookie": cookie, "token": token}
@@ -668,7 +741,7 @@ def _apply_section_patch(
         config["preferences"] = _normalize_preferences(payload, partial=True)
     elif section == "execution_policy":
         config["setup"]["execution_policy"] = _normalize_execution_policy(
-            payload, partial=True
+            payload, partial=True, existing=config["setup"]["execution_policy"]
         )
     else:
         raise ConfigError(f"unsupported setup section: {section}")
@@ -839,7 +912,7 @@ def _interactive_setup() -> int:
         "include rand_info and slave_bizuin; session keys may include slave_sid, "
         "slave_user, bizuin/data_bizuin, and data_ticket."
     )
-    cookie = getpass.getpass("WeChat Cookie (hidden): ").strip()
+    cookie = normalize_cookie(getpass.getpass("WeChat Cookie (hidden): "))
     token = getpass.getpass("WeChat token (hidden): ").strip()
     if not cookie or not token:
         print("Cookie and token are required")

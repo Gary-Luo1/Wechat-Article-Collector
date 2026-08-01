@@ -67,6 +67,15 @@ Run `manage doctor` or `lark --version`. The tested release is `@larksuite/cli@1
 npm install --prefix <APP_STATE>/lark-cli @larksuite/cli@1.0.69
 ```
 
+On Windows, `npm install` can fail with `EBUSY: resource busy or locked` when
+Defender or another process is scanning the freshly written package. Retry the
+same command after a short pause; if it keeps failing, verify nothing is
+holding the target directory (`tasklist` or a second npm process), exclude the
+state directory from real-time scanning, or fall back to an existing global
+`lark-cli` (`>=1.0.69,<2`) and verify with `manage doctor`. The Skill accepts
+either the isolated `<APP_STATE>/lark-cli` install or a compatible global
+binary; the version gate is the only requirement.
+
 The adapter resolves the native executable (`lark-cli.exe` on Windows) before
 any npm `.cmd` launcher. It sets both `LARKSUITE_CLI_CONFIG_DIR` and
 `HOME`/`USERPROFILE` to `<APP_STATE>/lark-cli-home`, uses
@@ -102,12 +111,20 @@ without a user OAuth flow.
 After the identity choice and installation, choose exactly one binding mode during
 the front-loaded configuration:
 
-1. `agent`: only when Lark Channel is detected. After the
-   user confirms the App ID and `user-default` identity policy, run
-   `lark config bind --source lark-channel --app-id <APP_ID> --identity user-default`.
-   Binding changes
+1. `agent`: only when a supported host Agent is detected (OpenClaw, Hermes, or
+   Lark Channel). The wrapper detects the host from its environment signals
+   (`OPENCLAW_HOME`/`OPENCLAW_STATE_DIR`/`OPENCLAW_GATEWAY_TOKEN`,
+   `HERMES_HOME`/`HERMES_STATE_DIR`, or `LARK_CHANNEL`/`LARK_CHANNEL_HOME`/
+   `LARK_CHANNEL_APP_ID`) and binds with the matching source:
+   `lark config bind --source <detected source> --app-id <APP_ID> --identity user-default`.
+   The detected source must equal the saved `agent_source`. Binding changes
    the Skill's isolated configuration, so include this exact choice in the
-   front-loaded confirmation.
+   front-loaded confirmation. If lark-cli later reports that the pinned
+   `--profile` does not exist (for example lark-cli created the profile as
+   `cli_<app_id>` instead of the Skill name), run
+   `manage feishu-context --verify` first: it resolves the real profile by App
+   ID and corrects `cli_profile` automatically instead of editing config.json
+   by hand.
 2. `existing`/`dedicated`: first run
 `manage feishu-app --app-id <APP_ID>`. It derives a stable private profile
 name from the App ID. Reuse a matching local profile through the read-only

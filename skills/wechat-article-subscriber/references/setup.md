@@ -16,7 +16,9 @@ bash install.sh --target agents
 .\install.ps1 -Target agents
 ```
 
-Targets: `agents`, `codex`, `claude`, `copilot`, or `all`. For another Agent, install the canonical Skill to an exact folder:
+Targets: `agents`, `codex`, `claude`, `copilot`, `openclaw`, `hermes`, or `all`.
+`openclaw` installs to `~/.openclaw/skills` and `hermes` to `~/.hermes/skills`.
+For another Agent, install the canonical Skill to an exact folder:
 
 ```text
 bash install.sh --target agents --destination /custom/skills/wechat-article-subscriber
@@ -24,6 +26,23 @@ bash install.sh --target agents --destination /custom/skills/wechat-article-subs
 ```
 
 Do not combine a custom destination with `all`. The installer atomically backs up an existing copy, installs only canonical files, and creates an isolated runtime in application state. `WECHAT_SKILL_INSTALL_ROOT` remains available for CI. `--no-deps` / `-NoDeps` requires `requests` and `beautifulsoup4` in the selected runtime.
+
+## Windows configuration without pipes
+
+Windows PowerShell 5.1 pipes strings to native commands with unreliable UTF-8
+encoding, which can turn Chinese values into `????`. Instead of
+`$json | & run.ps1 setup --agent-stdin`, use the one-time file inbox so the JSON
+is written as UTF-8 bytes by PowerShell itself:
+
+```powershell
+$inbox = (& .\scripts\run.ps1 setup --prepare-agent-file).Trim()
+$json | Out-File -FilePath $inbox -Encoding utf8
+.\scripts\run.ps1 setup --agent-file $inbox
+```
+
+The same file channel is available for the trusted Feishu host context:
+`manage feishu-host-context --agent-file <path>` (on any platform). `--agent-stdin`
+remains the default for POSIX shells and Agents that can pipe raw bytes.
 
 ## Front-loaded configuration
 

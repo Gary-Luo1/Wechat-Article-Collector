@@ -6,7 +6,7 @@ INSTALL_DEPS=1
 DESTINATION=""
 
 usage() {
-  echo "Usage: ./install.sh [--target agents|codex|claude|copilot|all] [--destination PATH] [--no-deps]"
+  echo "Usage: ./install.sh [--target agents|codex|claude|copilot|openclaw|hermes|all] [--destination PATH] [--no-deps]"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -20,7 +20,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$TARGET" in
-  agents|codex|claude|copilot|all) ;;
+  agents|codex|claude|copilot|openclaw|hermes|all) ;;
   *) echo "Invalid target: $TARGET" >&2; exit 2 ;;
 esac
 if [ -n "$DESTINATION" ] && [ "$TARGET" = "all" ]; then
@@ -55,6 +55,8 @@ target_parent() {
       fi ;;
     claude) printf '%s\n' "$profile_root/.claude/skills" ;;
     copilot) printf '%s\n' "$profile_root/.copilot/skills" ;;
+    openclaw) printf '%s\n' "$profile_root/.openclaw/skills" ;;
+    hermes) printf '%s\n' "$profile_root/.hermes/skills" ;;
   esac
 }
 

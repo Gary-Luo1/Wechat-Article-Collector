@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 [CmdletBinding()]
 param(
-    [ValidateSet("agents", "codex", "claude", "copilot", "all")]
+    [ValidateSet("agents", "codex", "claude", "copilot", "openclaw", "hermes", "all")]
     [string]$Target = "agents",
     [string]$InstallPath,
     [switch]$NoDeps
@@ -66,6 +66,8 @@ function Get-TargetParent([string]$Kind) {
         }
         "claude" { return Join-Path $profileRoot ".claude\skills" }
         "copilot" { return Join-Path $profileRoot ".copilot\skills" }
+        "openclaw" { return Join-Path $profileRoot ".openclaw\skills" }
+        "hermes" { return Join-Path $profileRoot ".hermes\skills" }
     }
 }
 

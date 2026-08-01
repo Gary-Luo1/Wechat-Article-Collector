@@ -848,23 +848,38 @@ class TestBitable:
         assert "--yes" in args
         assert run.call_args.kwargs["retries"] == 1
 
-    def test_standard_base_creation_keeps_unicode_json_out_of_the_shell(self):
+    def test_standard_base_creation_uses_relative_fields_file(self, tmp_path):
         import bitable_client
+        from pathlib import Path
+
+        captured: dict[str, Any] = {}
+
+        def fake_run(args, **kwargs):
+            fields_path = Path(tmp_path) / "base-fields.json"
+            captured["fields"] = json.loads(
+                fields_path.read_text(encoding="utf-8")
+            )
+            return {"ok": True}
 
         with mock.patch.object(
-            bitable_client, "_run_lark", return_value={"ok": True}
-        ) as run:
+            bitable_client, "_run_lark", side_effect=fake_run
+        ) as run, mock.patch.object(
+            bitable_client,
+            "lark_cli_work_dir",
+            return_value=Path(tmp_path),
+        ):
             bitable_client.create_standard_base(
                 "公众号文章", "文章列表", identity="bot"
             )
         args = run.call_args.args[0]
         assert args[:2] == ["base", "+base-create"]
-        fields_json = args[args.index("--fields") + 1]
-        fields = json.loads(fields_json)
+        assert args[args.index("--fields") + 1] == "@base-fields.json"
+        fields = captured["fields"]
         assert len(fields) == 11
         assert fields[0]["name"] == "文章标题"
         assert any(field["name"] == "文章链接" for field in fields)
         assert "@-" not in args
+        assert not (Path(tmp_path) / "base-fields.json").exists()
         assert run.call_args.kwargs["retries"] == 1
 
     def test_created_base_identifiers_are_extracted_without_guessing(self):

@@ -496,6 +496,158 @@ def test_execution_policy_invalidates_only_when_feishu_approval_scope_changes():
     assert policy["approved_at"] == ""
 
 
+def test_execution_policy_partial_patch_preserves_omitted_fields(
+    monkeypatch: pytest.MonkeyPatch, capsys
+):
+    import init_config
+    from config_store import load_config, save_config
+
+    config = configured()
+    config["feishu"]["destination"] = "existing"
+    config["setup"]["execution_policy"].update(
+        {
+            "confirmed": True,
+            "mode": "autopilot",
+            "unlisted_publisher": "ingest_once",
+            "allow_feishu_sync": True,
+            "approved_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    save_config(config)
+    monkeypatch.setattr(
+        init_config.sys,
+        "stdin",
+        io.StringIO('{"approved_at":"2026-02-01T00:00:00+00:00"}'),
+    )
+    assert (
+        init_config.main(
+            ["--agent-stdin", "--section", "execution_policy", "--format", "json"]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    saved = load_config()["setup"]["execution_policy"]
+    assert saved["confirmed"] is True
+    assert saved["unlisted_publisher"] == "ingest_once"
+    assert saved["allow_feishu_sync"] is True
+    assert saved["approved_at"] == "2026-02-01T00:00:00+00:00"
+
+
+def test_agent_source_detection_per_platform(monkeypatch: pytest.MonkeyPatch):
+    import manage
+
+    for name in (
+        "OPENCLAW_HOME",
+        "OPENCLAW_STATE_DIR",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "HERMES_HOME",
+        "HERMES_STATE_DIR",
+        "LARK_CHANNEL",
+        "LARK_CHANNEL_HOME",
+        "LARK_CHANNEL_APP_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert manage._detect_agent_source() == ""
+
+    monkeypatch.setenv("OPENCLAW_HOME", "/tmp/oc")
+    assert manage._detect_agent_source() == "openclaw"
+    monkeypatch.delenv("OPENCLAW_HOME")
+
+    monkeypatch.setenv("HERMES_STATE_DIR", "/tmp/hermes")
+    assert manage._detect_agent_source() == "hermes"
+    monkeypatch.delenv("HERMES_STATE_DIR")
+
+    monkeypatch.setenv("LARK_CHANNEL_APP_ID", "cli_x")
+    assert manage._detect_agent_source() == "lark-channel"
+
+
+def test_config_accepts_openclaw_and_hermes_agent_source(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from config_store import load_config, save_config
+
+    for source in ("openclaw", "hermes"):
+        config = configured()
+        config["feishu"].update({"binding_mode": "agent", "agent_source": source})
+        save_config(config)
+        assert load_config()["feishu"]["agent_source"] == source
+
+
+def test_host_context_accepts_openclaw_via_agent_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    import manage
+    from config_store import load_config, save_config
+
+    config = configured()
+    config["feishu"]["destination"] = "existing"
+    save_config(config)
+    context_path = tmp_path / "host-context.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "source": "openclaw",
+                "app_id": "cli_abc",
+                "sender_open_id": "ou_sender",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        manage.main(["feishu-host-context", "--agent-file", str(context_path)]) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["source"] == "openclaw"
+    assert load_config()["feishu"]["agent_source"] == "openclaw"
+
+
+def test_feishu_context_self_heals_cli_profile_for_existing_binding(
+    monkeypatch: pytest.MonkeyPatch, capsys
+):
+    import manage
+    from config_store import load_config, save_config
+
+    config = configured()
+    config["setup"]["feishu_identity_confirmed"] = True
+    config["feishu"].update(
+        {
+            "destination": "existing",
+            "enabled": True,
+            "identity": "bot",
+            "binding_mode": "existing",
+            "expected_app_id": "cli_abc",
+            "cli_profile": "wechat-article-stale",
+            "base_token": "bas_x",
+            "table_id": "tbl_x",
+        }
+    )
+    save_config(config)
+    monkeypatch.setattr(
+        manage,
+        "resolve_lark_profile",
+        lambda app_id: {
+            "profile": "cli_a95a41a64eb81ceb",
+            "app_id": app_id,
+            "matched_by": "test",
+            "match_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        manage,
+        "feishu_identity_context",
+        lambda verify=False: {
+            "identity": "bot",
+            "app_id": "cli_abc",
+            "app_id_unambiguous": True,
+            "bot": {"available": True, "status": "ready"},
+            "user": {"available": False, "status": "missing", "token_status": ""},
+        },
+    )
+    assert manage.main(["feishu-context", "--verify"]) == 0
+    capsys.readouterr()
+    assert load_config()["feishu"]["cli_profile"] == "cli_a95a41a64eb81ceb"
+
+
 def test_feishu_identity_change_invalidates_execution_policy(capsys):
     import manage
     from config_store import load_config, save_config

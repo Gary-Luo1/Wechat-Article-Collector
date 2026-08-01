@@ -240,8 +240,10 @@ def _validate_feishu(feishu: Any) -> None:
         raise ConfigError(
             "feishu.binding_mode must be agent, existing, dedicated, or empty"
         )
-    if feishu["agent_source"] not in {"", "lark-channel"}:
-        raise ConfigError("feishu.agent_source must be lark-channel or empty")
+    if feishu["agent_source"] not in {"", "openclaw", "hermes", "lark-channel"}:
+        raise ConfigError(
+            "feishu.agent_source must be openclaw, hermes, lark-channel, or empty"
+        )
     if feishu["binding_mode"] == "agent" and not feishu["agent_source"]:
         raise ConfigError("feishu.agent_source is required for agent binding")
     if feishu["binding_mode"] != "agent" and feishu["agent_source"]:
