@@ -1,3 +1,14 @@
-# macOS Finder metadata
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
 .DS_Store
 **/.DS_Store
+.env
+config.json
+queue.json
+queue.lock
