@@ -5,9 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import time
-import urllib.parse
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -15,6 +13,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from paths import lock_path, queue_path, secure_write_json
+from process_lock import process_lock
+from url_identity import normalize_article_url
 
 
 QUEUE_VERSION = 1
@@ -26,29 +26,8 @@ def empty_queue() -> dict[str, Any]:
 
 
 def normalize_url(url: str) -> str:
-    """Normalize a URL without collapsing distinct WeChat articles."""
-    if not isinstance(url, str) or not url.strip():
-        raise ValueError("article URL must be a non-empty string")
-    parsed = urllib.parse.urlsplit(url.strip())
-    scheme = parsed.scheme.lower()
-    host = (parsed.hostname or "").lower()
-    if scheme not in {"http", "https"} or not host:
-        raise ValueError("article URL must use http or https")
-    port = parsed.port
-    netloc = host if port is None else f"{host}:{port}"
-    path = re.sub(r"/{2,}", "/", parsed.path or "/").rstrip("/") or "/"
-    if host == "mp.weixin.qq.com" and path in {"/s", "/s/"}:
-        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-        ordered = []
-        for key in ("__biz", "mid", "sn", "idx"):
-            if key in params and params[key]:
-                ordered.append((key, params[key][0]))
-        query = urllib.parse.urlencode(ordered)
-    elif host == "mp.weixin.qq.com" and path.startswith("/s/"):
-        query = ""
-    else:
-        query = ""
-    return urllib.parse.urlunsplit((scheme, netloc, path, query, ""))
+    """Normalize a URL into the queue identity key (rule in url_identity)."""
+    return normalize_article_url(url)
 
 
 def content_hash(article: dict[str, Any]) -> str | None:
@@ -70,45 +49,8 @@ def content_hash(article: dict[str, Any]) -> str | None:
 @contextmanager
 def queue_lock(timeout: float = 10.0) -> Iterator[None]:
     """Acquire a cross-platform process lock for queue transactions."""
-    path = lock_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+b")
-    deadline = time.monotonic() + timeout
-    acquired = False
-    try:
-        while not acquired:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    handle.seek(0)
-                    if handle.tell() == 0:
-                        handle.write(b"0")
-                        handle.flush()
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except (BlockingIOError, OSError):
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(f"timed out waiting for queue lock {path}")
-                time.sleep(0.05)
+    with process_lock(lock_path(), timeout=timeout):
         yield
-    finally:
-        if acquired:
-            if os.name == "nt":
-                import msvcrt
-
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
 
 
 def _validate_queue(data: Any) -> dict[str, Any]:

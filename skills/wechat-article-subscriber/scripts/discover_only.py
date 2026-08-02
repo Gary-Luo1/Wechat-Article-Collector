@@ -9,9 +9,10 @@ import sys
 import time
 from pathlib import Path
 
+from article_inbox import known_urls
 from config_store import ConfigError, load_config, modify_config, update_health
 from protocol import dump, failure, success
-from queue_helpers import add_pending, cleanup_processed, normalize_url, read_queue
+from queue_helpers import add_pending, cleanup_processed, normalize_url
 from subscription_resolution import exact_matches, sanitize_candidates, subscription_query
 from wechat_api import (
     WeChatAPI,
@@ -261,10 +262,7 @@ def main(argv: list[str] | None = None) -> int:
         hours = arguments.hours or float(config["settings"]["check_hours"])
         diagnostics: list[dict] = []
         articles = discover_articles(config, hours, arguments.config, diagnostics)
-        queue_snapshot = read_queue()
-        existing_urls = {
-            item["normalized_url"] for item in queue_snapshot["pending"]
-        } | set(queue_snapshot["processed"])
+        existing_urls = known_urls()
         for diagnostic in diagnostics:
             account = diagnostic["account"]
             diagnostic["new_candidates"] = sum(

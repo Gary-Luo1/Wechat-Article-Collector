@@ -15,14 +15,11 @@ from typing import Any
 from article_inbox import plan_digest, query_inbox
 from bitable_client import (
     LarkCLIError,
-    lark_cli_info,
-    preflight_feishu,
     standard_field_schema,
-    upsert_article,
 )
 from config_store import DEFAULT_CONFIG, ConfigError, load_config, modify_config, update_health
 from execution_policy import autopilot_policy, invalidate_for_feishu_change
-from feishu_target import FeishuTarget
+from feishu_target import production_feishu_target
 from protocol import dump, failure, success
 from queue_helpers import (
     cleanup_processed,
@@ -45,27 +42,10 @@ from scoring_rubric import (
     should_sync,
 )
 from subscription_resolution import matches_subscription
+from url_identity import canonicalize_wechat_article_url
 
 
 logger = logging.getLogger("wechat-process")
-
-
-def build_feishu_target(feishu: dict[str, Any]) -> FeishuTarget:
-    """Construct the production target while keeping CLI handlers testable."""
-    return FeishuTarget(
-        feishu,
-        cli_info=lark_cli_info,
-        preflight=preflight_feishu,
-        upsert=lambda target, article, metadata, dry_run: upsert_article(
-            target, article, metadata, dry_run=dry_run
-        ),
-    )
-
-
-def canonicalize_wechat_article_url(url: str) -> str:
-    from article_reader import canonicalize_wechat_article_url as canonicalize
-
-    return canonicalize(url)
 
 
 def fetch_article(url: str, **kwargs: Any) -> dict[str, Any]:
@@ -386,7 +366,7 @@ def _sync_entry(entry: dict[str, Any], *, dry_run: bool = False) -> None:
     feishu = config["feishu"]
     if not feishu["enabled"]:
         raise ConfigError("Feishu sync is disabled; complete Agent setup first")
-    build_feishu_target(feishu).sync(
+    production_feishu_target(feishu).sync(
         entry["article"], entry["metadata"], dry_run=dry_run
     )
     if not dry_run:
@@ -511,7 +491,7 @@ def cmd_sync_all(*, dry_run: bool = False) -> int:
 def cmd_feishu_check(*, save_mapping: bool = False) -> int:
     config = load_config()
     try:
-        check = build_feishu_target(config["feishu"]).check()
+        check = production_feishu_target(config["feishu"]).check()
     except Exception as exc:
         try:
             update_health(

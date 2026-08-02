@@ -408,7 +408,7 @@ class TestScoring:
 
 class TestReader:
     def test_url_allowlist(self):
-        from article_reader import is_wechat_article
+        from url_identity import is_wechat_article_url as is_wechat_article
 
         assert is_wechat_article("https://mp.weixin.qq.com/s/abc")
         assert is_wechat_article("https://mp.weixin.qq.com/s?__biz=x")
@@ -425,7 +425,7 @@ class TestReader:
         ],
     )
     def test_url_allowlist_rejects_path_escape(self, url):
-        from article_reader import is_wechat_article
+        from url_identity import is_wechat_article_url as is_wechat_article
 
         assert not is_wechat_article(url)
 
@@ -1079,8 +1079,9 @@ class TestProcess:
 
         self.valid_config(feishu=True)
         add_pending([article("a")])
-        with mock.patch.object(
-            process_pending, "upsert_article", side_effect=process_pending.LarkCLIError("nope")
+        with mock.patch(
+            "feishu_target.upsert_article",
+            side_effect=process_pending.LarkCLIError("nope"),
         ):
             result = process_pending.main(
                 ["done", "--link", article("a")["link"], "--dims", self.dims(), "--feishu"]
@@ -1094,7 +1095,7 @@ class TestProcess:
 
         self.valid_config(feishu=True)
         add_pending([article("a"), article("b")])
-        with mock.patch.object(process_pending, "upsert_article") as upsert:
+        with mock.patch("feishu_target.upsert_article") as upsert:
             result = process_pending.main(
                 ["done", "--link", article("a")["link"], "--dims", self.dims(), "--feishu"]
             )
@@ -1119,7 +1120,7 @@ class TestProcess:
             },
             ensure_ascii=False,
         )
-        with mock.patch.object(process_pending, "upsert_article") as upsert:
+        with mock.patch("feishu_target.upsert_article") as upsert:
             result = process_pending.main(
                 [
                     "done",
@@ -1140,7 +1141,7 @@ class TestProcess:
 
         self.valid_config(feishu=True)
         add_pending([article("a")])
-        with mock.patch.object(process_pending, "upsert_article") as upsert:
+        with mock.patch("feishu_target.upsert_article") as upsert:
             result = process_pending.main(
                 [
                     "done",

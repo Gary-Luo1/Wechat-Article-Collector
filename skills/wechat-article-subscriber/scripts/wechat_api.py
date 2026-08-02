@@ -8,6 +8,8 @@ from typing import Optional
 
 import requests
 
+from url_identity import upgrade_wechat_article_url
+
 
 logger = logging.getLogger(__name__)
 
@@ -210,22 +212,7 @@ class WeChatAPI:
 
     @staticmethod
     def format_article(article: dict) -> dict:
-        link = str(article.get("link", "")).strip()
-        try:
-            from urllib.parse import urlsplit, urlunsplit
-
-            parsed = urlsplit(link)
-            if (
-                parsed.scheme == "http"
-                and (parsed.hostname or "").lower() == "mp.weixin.qq.com"
-                and (parsed.path == "/s" or parsed.path.startswith("/s/"))
-                and parsed.username is None
-                and parsed.password is None
-                and parsed.port is None
-            ):
-                link = urlunsplit(parsed._replace(scheme="https"))
-        except (TypeError, UnicodeError, ValueError):
-            pass
+        link = upgrade_wechat_article_url(str(article.get("link", "")).strip())
         return {
             "aid": str(article.get("aid", "")),
             "appmsgid": str(article.get("appmsgid", "")),

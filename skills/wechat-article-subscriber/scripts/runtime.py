@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from paths import venv_dir
+
 
 COMMANDS = {
     "setup": "init_config.py",
@@ -18,21 +20,8 @@ COMMANDS = {
 }
 
 
-def _data_dir() -> Path:
-    override = os.environ.get("WECHAT_ARTICLE_HOME")
-    if override:
-        return Path(override).expanduser().resolve()
-    if os.name == "nt":
-        root = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
-        if root:
-            return Path(root) / "wechat-article-subscriber"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "wechat-article-subscriber"
-    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "wechat-article-subscriber"
-
-
 def _venv_python() -> Path:
-    root = _data_dir() / "venv"
+    root = venv_dir()
     return root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 

@@ -1504,6 +1504,7 @@ def test_subscription_resolution_matches_aliases_and_biz_consistently():
 
 
 def test_process_json_failure_is_structured(capsys):
+    import feishu_target
     import process_pending
 
     assert process_pending.main(["--format", "json", "read", "1"]) == 1
@@ -1752,6 +1753,7 @@ def test_lark_confirmation_envelope_is_not_misclassified_as_api_error():
 def test_feishu_check_save_mapping_keeps_fresh_health(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
+    import feishu_target
     import process_pending
     from config_store import load_config, save_config
 
@@ -1773,7 +1775,7 @@ def test_feishu_check_save_mapping_keeps_fresh_health(
     )
     save_config(config)
     monkeypatch.setattr(
-        process_pending,
+        feishu_target,
         "lark_cli_info",
         lambda: {"version": "1.0.69", "compatible": True},
     )
@@ -1782,7 +1784,7 @@ def test_feishu_check_save_mapping_keeps_fresh_health(
         "url": {"field_id": "fld_url", "name": "URL", "type": "url"},
     }
     monkeypatch.setattr(
-        process_pending,
+        feishu_target,
         "preflight_feishu",
         lambda feishu: {
             "identity": "bot",

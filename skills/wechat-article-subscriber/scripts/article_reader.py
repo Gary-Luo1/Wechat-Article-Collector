@@ -12,61 +12,20 @@ from typing import Any, Optional
 import requests
 from bs4 import BeautifulSoup
 
+from url_identity import (
+    ALLOWED_HOST,
+    canonicalize_wechat_article_url,
+    is_wechat_article_url,
+)
+
+
+# Backward-compatible alias: the allowlist rule now lives in url_identity.
+is_wechat_article = is_wechat_article_url
 
 logger = logging.getLogger(__name__)
-ALLOWED_HOST = "mp.weixin.qq.com"
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_TEXT_CHARS = 100_000
 MAX_REDIRECTS = 3
-
-
-def is_wechat_article(url: str) -> bool:
-    try:
-        parsed = urllib.parse.urlsplit(url)
-        raw_path = parsed.path
-        decoded_path = raw_path
-        for _ in range(4):
-            next_path = urllib.parse.unquote(decoded_path)
-            if next_path == decoded_path:
-                break
-            decoded_path = next_path
-        else:
-            return False
-        segments = decoded_path.replace("\\", "/").split("/")
-        return (
-            parsed.scheme == "https"
-            and (parsed.hostname or "").lower() == ALLOWED_HOST
-            and parsed.username is None
-            and parsed.password is None
-            and parsed.port is None
-            and "\\" not in raw_path
-            and "\\" not in decoded_path
-            and not any(segment in {".", ".."} for segment in segments)
-            and not any(ord(character) < 32 for character in decoded_path)
-            and (decoded_path == "/s" or decoded_path.startswith("/s/"))
-        )
-    except (TypeError, UnicodeError, ValueError):
-        return False
-
-
-def canonicalize_wechat_article_url(url: str) -> str:
-    """Upgrade an exact-host HTTP API result before any network request."""
-    try:
-        parsed = urllib.parse.urlsplit(url)
-        if (
-            parsed.scheme == "http"
-            and (parsed.hostname or "").lower() == ALLOWED_HOST
-            and parsed.username is None
-            and parsed.password is None
-            and parsed.port is None
-        ):
-            parsed = parsed._replace(scheme="https")
-            url = urllib.parse.urlunsplit(parsed)
-    except (TypeError, UnicodeError, ValueError):
-        pass
-    if not is_wechat_article(url):
-        raise ValueError("only https://mp.weixin.qq.com/s article URLs are allowed")
-    return url
 
 
 def _validate_url(url: str) -> str:

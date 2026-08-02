@@ -61,6 +61,49 @@ def _item_matches(
     return not query or query in searchable
 
 
+def _queue_summary(queue: dict[str, Any]) -> dict[str, Any]:
+    """One summary implementation shared by the inbox view and callers."""
+    return {
+        "pending": len(queue["pending"]),
+        "processed": len(queue["processed"]),
+        "favorites": sum(
+            bool(article.get("favorite", False)) for article in queue["pending"]
+        )
+        + sum(
+            bool(entry.get("article", {}).get("favorite", False))
+            for entry in queue["processed"].values()
+            if isinstance(entry, dict)
+        ),
+        "later": sum(
+            article.get("inbox_state", "active") == "later"
+            for article in queue["pending"]
+        ),
+        "dismissed": sum(
+            entry.get("metadata", {}).get("disposition") == "dismissed"
+            for entry in queue["processed"].values()
+            if isinstance(entry, dict)
+        ),
+        "sync_pending": sum(
+            entry.get("sync_status") == "pending"
+            for entry in queue["processed"].values()
+            if isinstance(entry, dict)
+        ),
+    }
+
+
+def queue_summary() -> dict[str, Any]:
+    """Return one consistent summary of pending and processed articles."""
+    return _queue_summary(read_queue())
+
+
+def known_urls() -> set[str]:
+    """Return every article URL identity currently in the queue."""
+    queue = read_queue()
+    return {item["normalized_url"] for item in queue["pending"]} | set(
+        queue["processed"]
+    )
+
+
 def query_inbox(
     *,
     status: str = "pending",
@@ -134,34 +177,7 @@ def query_inbox(
     matched = len(selected)
     selected = selected[:limit]
     return {
-        "summary": {
-            "pending": len(queue["pending"]),
-            "processed": len(queue["processed"]),
-            "favorites": sum(
-                bool(article.get("favorite", False)) for article in queue["pending"]
-            )
-            + sum(
-                bool(entry.get("article", {}).get("favorite", False))
-                for entry in queue["processed"].values()
-                if isinstance(entry, dict)
-            ),
-            "later": sum(
-                article.get("inbox_state", "active") == "later"
-                for article in queue["pending"]
-            ),
-            "dismissed": sum(
-                entry.get("metadata", {}).get("disposition") == "dismissed"
-                for entry in queue["processed"].values()
-                if isinstance(entry, dict)
-            ),
-            "sync_pending": sum(
-                entry.get("sync_status") == "pending"
-                for entry in queue["processed"].values()
-                if isinstance(entry, dict)
-            ),
-            "matched": matched,
-            "returned": len(selected),
-        },
+        "summary": {**_queue_summary(queue), "matched": matched, "returned": len(selected)},
         "filters": {
             "status": status,
             "account": account,

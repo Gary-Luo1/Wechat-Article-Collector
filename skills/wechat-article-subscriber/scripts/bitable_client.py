@@ -20,6 +20,7 @@ from lark_runtime import (
     resolve_lark_cli,
     safe_lark_arguments,
 )
+from url_identity import upgrade_wechat_article_url
 
 
 FIELD_SPECS: dict[str, dict[str, Any]] = {
@@ -595,21 +596,7 @@ def _datetime_value(timestamp: Any) -> str:
 
 
 def _https_wechat_url(value: Any) -> str:
-    url = str(value or "").strip()
-    try:
-        parsed = urllib.parse.urlsplit(url)
-        if (
-            parsed.scheme == "http"
-            and (parsed.hostname or "").lower() == "mp.weixin.qq.com"
-            and (parsed.path == "/s" or parsed.path.startswith("/s/"))
-            and parsed.username is None
-            and parsed.password is None
-            and parsed.port is None
-        ):
-            return urllib.parse.urlunsplit(parsed._replace(scheme="https"))
-    except (TypeError, UnicodeError, ValueError):
-        pass
-    return url
+    return upgrade_wechat_article_url(value)
 
 
 def _logical_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:

@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.3.0 - Unreleased
+
+### Changed
+
+- Unify article URL identity rules (validation, canonicalization, dedup key,
+  and http-to-https upgrade) in one stdlib-only module shared by queue,
+  discovery, ingestion, parsing, and Feishu records; pure URL validation no
+  longer requires the HTML parser dependency.
+- Route doctor/status queue statistics and the known-URL dedup query through
+  one queue-module interface instead of raw storage reads.
+- Share one cross-platform process lock between the queue and configuration
+  stores.
+- Resolve the state directory and venv location from a single paths module in
+  the command runtime.
+- Move the Feishu target wiring to one production construction point shared by
+  processing and management flows.
+
+### Fixed
+
+- Doctor online checks now report an incompatible lark-cli version as a Feishu
+  validation failure instead of bypassing the compatibility check.
+
 ## 2.2.0 - Unreleased
 
 ### Added

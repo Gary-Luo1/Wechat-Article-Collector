@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import time
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -12,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from paths import config_path, data_dir, secure_write_json
+from process_lock import process_lock
 
 
 CONFIG_VERSION = 10
@@ -478,45 +477,8 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
 @contextmanager
 def config_lock(timeout: float = 10.0) -> Iterator[None]:
     """Acquire a cross-platform process lock for configuration transactions."""
-    path = data_dir() / "config.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+b")
-    deadline = time.monotonic() + timeout
-    acquired = False
-    try:
-        while not acquired:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    handle.seek(0)
-                    if handle.tell() == 0:
-                        handle.write(b"0")
-                        handle.flush()
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except (BlockingIOError, OSError):
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(f"timed out waiting for config lock {path}")
-                time.sleep(0.05)
+    with process_lock(data_dir() / "config.lock", timeout=timeout):
         yield
-    finally:
-        if acquired:
-            if os.name == "nt":
-                import msvcrt
-
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
 
 
 def modify_config(

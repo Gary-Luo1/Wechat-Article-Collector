@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from bitable_client import LarkCLIError
+from bitable_client import LarkCLIError, lark_cli_info, preflight_feishu, upsert_article
 
 
 class FeishuTarget:
@@ -47,3 +47,15 @@ class FeishuTarget:
                 "Feishu sync is disabled; complete Agent setup first", kind="config"
             )
         self._upsert(self._feishu, article, metadata, dry_run)
+
+
+def production_feishu_target(feishu: dict[str, Any]) -> FeishuTarget:
+    """Construct the production target wiring real lark-cli adapters."""
+    return FeishuTarget(
+        feishu,
+        cli_info=lark_cli_info,
+        preflight=preflight_feishu,
+        upsert=lambda target, article, metadata, dry_run: upsert_article(
+            target, article, metadata, dry_run=dry_run
+        ),
+    )

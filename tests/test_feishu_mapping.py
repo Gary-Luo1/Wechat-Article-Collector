@@ -38,15 +38,16 @@ def configured(home: Path) -> dict:
 
 
 def _run_check(monkeypatch: pytest.MonkeyPatch, mapping: dict) -> int:
+    import feishu_target
     import process_pending
 
     monkeypatch.setattr(
-        process_pending,
+        feishu_target,
         "lark_cli_info",
         lambda: {"version": "1.0.69", "compatible": True},
     )
     monkeypatch.setattr(
-        process_pending,
+        feishu_target,
         "preflight_feishu",
         lambda feishu: {
             "identity": "bot",

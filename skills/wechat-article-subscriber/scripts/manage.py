@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from article_inbox import queue_summary
 from bitable_client import (
     LarkCLIError,
     create_standard_base,
@@ -43,6 +44,7 @@ from execution_policy import (
     next_stage,
     policy_for,
 )
+from feishu_target import production_feishu_target
 from paths import config_path, data_dir, lock_path, queue_path, venv_dir
 from lark_runtime import (
     discover_global_lark_profiles,
@@ -50,7 +52,6 @@ from lark_runtime import (
     profile_name_for_app,
 )
 from protocol import dump, failure, success
-from queue_helpers import read_queue
 
 
 STEP_LABELS = {
@@ -295,32 +296,10 @@ def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
                 "next_action": "increase_max_articles_per_account_or_reduce_search_window",
             }
         )
-    queue = read_queue()
+    summary = queue_summary()
     report["queue"] = {
-        "total": len(queue["pending"]) + len(queue["processed"]),
-        "pending": len(queue["pending"]),
-        "processed": len(queue["processed"]),
-        "favorites": sum(
-            bool(article.get("favorite", False)) for article in queue["pending"]
-        )
-        + sum(
-            bool(entry.get("article", {}).get("favorite", False))
-            for entry in queue["processed"].values()
-            if isinstance(entry, dict)
-        ),
-        "later": sum(
-            article.get("inbox_state", "active") == "later"
-            for article in queue["pending"]
-        ),
-        "dismissed": sum(
-            entry.get("metadata", {}).get("disposition") == "dismissed"
-            for entry in queue["processed"].values()
-            if isinstance(entry, dict)
-        ),
-        "sync_pending": sum(
-            item.get("sync_status") == "pending"
-            for item in queue["processed"].values()
-        ),
+        "total": summary["pending"] + summary["processed"],
+        **summary,
     }
     cli: dict[str, Any] | None = None
     try:
@@ -367,7 +346,7 @@ def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
 
         if config["feishu"]["enabled"]:
             try:
-                result = preflight_feishu(config["feishu"])
+                result = production_feishu_target(config["feishu"]).check()
                 update_health("feishu", success=True)
                 online_report["feishu"] = {"ok": True, "preflight": result}
             except Exception as exc:
