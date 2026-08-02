@@ -7,7 +7,6 @@ import os
 import re
 import subprocess
 import time
-import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 

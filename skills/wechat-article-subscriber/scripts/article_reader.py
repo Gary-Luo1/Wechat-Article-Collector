@@ -13,7 +13,6 @@ import requests
 from bs4 import BeautifulSoup
 
 from url_identity import (
-    ALLOWED_HOST,
     canonicalize_wechat_article_url,
     is_wechat_article_url,
 )

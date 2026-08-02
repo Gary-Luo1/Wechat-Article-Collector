@@ -1504,7 +1504,6 @@ def test_subscription_resolution_matches_aliases_and_biz_consistently():
 
 
 def test_process_json_failure_is_structured(capsys):
-    import feishu_target
     import process_pending
 
     assert process_pending.main(["--format", "json", "read", "1"]) == 1
