@@ -184,12 +184,13 @@ Credential reset preserves subscriptions, settings, and queue but clears the
 execution policy together with credentials and Feishu bindings. Queue reset removes
 only the queue and its lock. All-data reset removes the local config, queue, lock,
 versioned config backups, unconsumed one-time Agent configuration inboxes, generated
-Feishu authorization QR images, and the Skill's isolated lark-cli home/work
-directories. It also removes legacy or future top-level application-state
-artifacts so they cannot contaminate a clean-start test. The only preserved
-application-state entries are the isolated Python (`venv`) and lark-cli package
-(`lark-cli`) runtimes; it does not delete the installed Skill, global lark-cli
-configuration, WeChat data, or Feishu Base data.
+Feishu authorization QR images, known queue/config recovery artifacts, and the
+Skill's isolated lark-cli home/work directories. It uses an explicit application
+artifact allowlist: unknown files and directories under `WECHAT_ARTICLE_HOME` are
+preserved, including when that variable points at a portable directory. It does
+not delete the installed Skill, isolated Python (`venv`) or lark-cli package
+(`lark-cli`) runtimes, global lark-cli configuration, WeChat data, or Feishu Base
+data.
 Deleted all-data state is not recoverable by the Skill.
 
 ## Stable command protocol

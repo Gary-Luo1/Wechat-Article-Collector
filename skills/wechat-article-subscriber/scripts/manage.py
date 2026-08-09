@@ -863,7 +863,13 @@ def _feishu_grant_manager(arguments: argparse.Namespace) -> tuple[dict[str, Any]
             kind="config",
         )
     verify_feishu_identity(config["feishu"], identity="bot")
-    grant_bot_created_resource(arguments.token, arguments.resource_type, manager_open_id)
+    # Resource tokens are sensitive and must not appear in shell history or
+    # the manage process argv. The official lark-cli still receives the token
+    # in its required --token argument inside the wrapper.
+    resource_token = sys.stdin.read().strip()
+    if not resource_token:
+        raise ValueError("resource token is required on stdin")
+    grant_bot_created_resource(resource_token, arguments.resource_type, manager_open_id)
     return {
         "resource_type": arguments.resource_type,
         "permission": "full_access",
@@ -1503,11 +1509,21 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         targets.extend([queue_path(), lock_path()])
     if scope == "all-data":
         root = config_path().parent
-        targets.append(config_path())
+        targets.extend(
+            [
+                config_path(),
+                root / "config.lock",
+                root / "queue.lock",
+                root / "fields.json",
+            ]
+        )
         for pattern in (
             "config.v*.backup.json",
             ".agent-config-*.json",
             "feishu-auth-qr*.png",
+            "queue.corrupt.*.json",
+            ".config.json.*",
+            ".queue.json.*",
         ):
             targets.extend(root.glob(pattern))
         targets.extend(
@@ -1517,15 +1533,8 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
                 root / "lark-cli-work",
             ]
         )
-        # Full reset is allowlist-based so legacy or future state files cannot
-        # silently survive and contaminate a clean-start test. Keep only the
-        # installed runtimes, which are code/dependencies rather than user data.
-        if root.is_dir():
-            targets.extend(
-                child
-                for child in root.iterdir()
-                if child.name not in {"venv", "lark-cli"}
-            )
+        # Keep the reset allowlist-based. Unknown files may belong to the user,
+        # especially when WECHAT_ARTICLE_HOME points at a portable directory.
     existing = sorted({path.resolve() for path in targets if path.exists()}, key=str)
     if not arguments.yes:
         return {"preview": [str(path) for path in existing], "deleted": []}, "rerun_with_yes"
@@ -1637,7 +1646,12 @@ def build_parser() -> argparse.ArgumentParser:
     manager = commands.add_parser("feishu-manager")
     manager.add_argument("--open-id", required=True)
     grant_manager = commands.add_parser("feishu-grant-manager")
-    grant_manager.add_argument("--token", required=True)
+    grant_manager.add_argument(
+        "--token-stdin",
+        action="store_true",
+        required=True,
+        help="read the resource token from stdin; never pass it as a command-line value",
+    )
     grant_manager.add_argument(
         "--type",
         dest="resource_type",

@@ -11,6 +11,11 @@
   ordinary chat, treat it as disclosed to that platform even when the Agent
   never repeats it.
 - Keep the assembled configuration in memory and prefer `setup --agent-stdin` through the process standard-input channel. Never place secrets in command-line arguments, shell interpolation, environment variables, repository files, arbitrary temporary files, logs, or bug reports.
+- The standalone Feishu manager-grant command follows the same boundary:
+  provide its resource token on stdin with `--token-stdin`, never as a `--token`
+  argument. The official lark-cli contract requires its internal wrapper call to
+  use `--token`; the wrapper redacts that value from errors and does not expose
+  it in the Skill command's argv.
 - If stdin is unavailable, use `setup --prepare-agent-file` to create a restricted one-time inbox in the application state directory. Write only to the returned path, consume it with `setup --agent-file`, and verify it was deleted. The consumer rejects symlinks, paths outside the state directory, unexpected filenames, oversized data, and invalid schemas.
 - If neither process stdin nor a filesystem API is available, stop and offer the local hidden-input wizard.
 - Revoke the browser session and refresh local configuration after suspected exposure.

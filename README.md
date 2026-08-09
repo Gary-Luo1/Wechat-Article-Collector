@@ -195,7 +195,8 @@ bash scripts/run.sh manage feishu-local-profile import
 bash scripts/run.sh manage feishu-local-profile import --yes
 bash scripts/run.sh manage feishu-manager --open-id "<OPEN_ID>"
 bash scripts/run.sh manage feishu-create-base --name "公众号文章" --table-name "文章列表"
-bash scripts/run.sh manage feishu-grant-manager --token "<RESOURCE_TOKEN>" --type bitable
+read -r -s RESOURCE_TOKEN
+printf '%s\n' "$RESOURCE_TOKEN" | bash scripts/run.sh manage feishu-grant-manager --token-stdin --type bitable
 bash scripts/run.sh lark --version
 bash scripts/run.sh manage subscriptions bulk-add --file subscriptions.json --dry-run
 bash scripts/run.sh manage subscriptions list

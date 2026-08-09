@@ -723,6 +723,27 @@ class TestWeChatAPI:
             api._get("https://mp.weixin.qq.com/cgi-bin/appmsg", {"action": "list_ex"})
         api.session.get.assert_called_once()
 
+    def test_transport_retry_obeys_request_delay_after_failed_attempt(self, monkeypatch):
+        import wechat_api
+        from wechat_api import WeChatAPI, WeChatAPIError
+
+        api = WeChatAPI("cookie=1; rand_info=2", "token", request_delay=3)
+        api.session.get = mock.Mock(side_effect=requests.ConnectionError("offline"))
+        monotonic = mock.Mock(side_effect=[100.0, 100.0, 101.0, 101.0])
+        sleeps: list[float] = []
+        monkeypatch.setattr(wechat_api.time, "monotonic", monotonic)
+        monkeypatch.setattr(wechat_api.time, "sleep", sleeps.append)
+
+        with pytest.raises(WeChatAPIError, match="after 2 attempts"):
+            api._get(
+                "https://mp.weixin.qq.com/cgi-bin/appmsg",
+                {"action": "list_ex"},
+                retries=2,
+            )
+
+        assert api.session.get.call_count == 2
+        assert sleeps == [1, 2]
+
     def test_article_listing_http_403_is_access_restricted_with_safe_details(self):
         from protocol import failure
         from wechat_api import WeChatAPI, WeChatAccessRestricted

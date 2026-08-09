@@ -27,6 +27,13 @@
 
 - Doctor online checks now report an incompatible lark-cli version as a Feishu
   validation failure instead of bypassing the compatibility check.
+- `manage reset --scope all-data` now removes only known Skill artifacts and
+  preserves unrelated files under the configurable state directory.
+- Discovery skips malformed individual articles and continues scanning the
+  account and remaining subscriptions; transport retries also honor the
+  configured request delay after failed attempts.
+- The standalone Feishu manager-grant command reads resource tokens from stdin
+  instead of accepting them as user-facing command-line arguments.
 - Article reads stop immediately on WeChat risk-control verification pages
   (环境异常 / verification markers) and on HTTP 403/429 instead of retrying
   and compounding the block; the discovery API treats HTTP 429 as an immediate

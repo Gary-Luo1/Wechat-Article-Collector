@@ -1054,11 +1054,11 @@ def test_bot_created_resource_grants_manager_full_access(
         )
         or {"ok": True},
     )
+    monkeypatch.setattr(sys, "stdin", io.StringIO("base_token\n"))
     assert manage.main(
         [
             "feishu-grant-manager",
-            "--token",
-            "base_token",
+            "--token-stdin",
             "--type",
             "bitable",
         ]
@@ -1071,7 +1071,7 @@ def test_bot_created_resource_grants_manager_full_access(
     assert payload["data"]["manager_open_id_included"] is False
 
 
-def test_bot_created_resource_requires_configured_manager(capsys):
+def test_bot_created_resource_requires_configured_manager(capsys, monkeypatch):
     import manage
     from config_store import save_config
 
@@ -1079,8 +1079,9 @@ def test_bot_created_resource_requires_configured_manager(capsys):
     config["setup"]["feishu_identity_confirmed"] = True
     config["feishu"].update({"identity": "bot", "expected_app_id": "cli_expected"})
     save_config(config)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("base_token\n"))
     assert manage.main(
-        ["feishu-grant-manager", "--token", "base_token", "--type", "bitable"]
+        ["feishu-grant-manager", "--token-stdin", "--type", "bitable"]
     ) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["error"]["code"] == "LARK_CONFIG"
@@ -1431,6 +1432,8 @@ def test_all_data_reset_removes_ephemeral_artifacts_and_preserves_runtime(capsys
     unknown_state = root / "legacy-state"
     unknown_state.mkdir()
     (unknown_state / "state.json").write_text("{}\n", encoding="utf-8")
+    unrelated = root / "unrelated-user-file.txt"
+    unrelated.write_text("keep me\n", encoding="utf-8")
     cli_config = root / "lark-cli-config"
     cli_config.mkdir()
     (cli_config / "config.json").write_text("{}\n", encoding="utf-8")
@@ -1453,7 +1456,8 @@ def test_all_data_reset_removes_ephemeral_artifacts_and_preserves_runtime(capsys
     assert str(cli_home.resolve()) in previewed
     assert str(cli_work.resolve()) in previewed
     assert str(legacy_fields.resolve()) in previewed
-    assert str(unknown_state.resolve()) in previewed
+    assert str(unknown_state.resolve()) not in previewed
+    assert str(unrelated.resolve()) not in previewed
     assert runtime_marker.exists()
 
     assert manage.main(["reset", "--scope", "all-data", "--yes"]) == 0
@@ -1466,13 +1470,15 @@ def test_all_data_reset_removes_ephemeral_artifacts_and_preserves_runtime(capsys
         inbox,
         qr,
         legacy_fields,
-        unknown_state,
     ):
         assert not path.exists()
     assert not cli_config.exists()
     assert not cli_home.exists()
     assert not cli_work.exists()
     assert runtime_marker.exists()
+    assert not legacy_fields.exists()
+    assert unknown_state.exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep me\n"
 
 
 def test_subscription_resolution_reports_ambiguity_without_guessing():

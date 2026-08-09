@@ -1,6 +1,6 @@
 ---
 name: wechat-article-subscriber
-description: Configure, discover, directly ingest, read, evaluate, queue, export, and optionally sync WeChat Official Account articles to Feishu Base. Use when a user sends a mp.weixin.qq.com article link, asks to 配置微信公众号订阅、查微信公众号文章、发现新文章、批量阅读或评分文章、过滤推广内容、管理待处理文章，或把文章同步到飞书多维表格. Requires a local Python runtime and network access.
+description: Configure, discover, directly ingest, read, queue, export, and optionally sync WeChat Official Account articles to Feishu Base. Use when a user sends a mp.weixin.qq.com article link, asks to 配置微信公众号订阅、查微信公众号文章、发现新文章、批量阅读或评分文章、过滤推广内容、管理待处理文章，或把文章同步到飞书多维表格. Requires a local Python runtime and network access.
 ---
 
 # WeChat Article Subscriber

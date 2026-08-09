@@ -235,7 +235,9 @@ transaction:
    document types use their deterministic wrapper path.
 3. Extract the returned resource token without exposing credentials.
 4. The Base wrapper grants the manager internally; for other resource types run
-   `manage feishu-grant-manager --token <RESOURCE_TOKEN> --type <RESOURCE_TYPE>`.
+   provide the resource token on stdin to
+   `manage feishu-grant-manager --token-stdin --type <RESOURCE_TYPE>`; it is
+   never accepted as a command-line value.
 5. Continue to content writes only when the result contains
    `manager_granted: true` and `permission: full_access`.
 

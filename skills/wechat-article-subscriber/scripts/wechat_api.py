@@ -151,13 +151,16 @@ class WeChatAPI:
                 remaining = self.request_delay - (time.monotonic() - self._last_request_at)
                 if remaining > 0:
                     time.sleep(remaining)
+                # Record the attempt start even when the transport fails. This
+                # keeps retries paced by request_delay instead of only by the
+                # exponential backoff.
+                self._last_request_at = time.monotonic()
                 response = self.session.get(
                     url,
                     params=merged,
                     proxies=self.proxies,
                     timeout=(10, 30),
                 )
-                self._last_request_at = time.monotonic()
                 if response.status_code == 401:
                     raise WeChatCookieExpired(
                         "WeChat session expired; sign in at https://mp.weixin.qq.com/ and "

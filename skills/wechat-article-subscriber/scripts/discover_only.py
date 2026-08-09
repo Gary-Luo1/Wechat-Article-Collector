@@ -190,26 +190,30 @@ def discover_articles(
             diagnostic["fetched"] = len(articles[:limit])
             account_articles: list[dict] = []
             for raw in articles[:limit]:
-                article = api.format_article(raw)
-                if not article["title"] or not article["link"]:
-                    diagnostic["invalid"] += 1
-                    continue
                 try:
+                    article = api.format_article(raw)
+                    if not article["title"] or not article["link"]:
+                        diagnostic["invalid"] += 1
+                        continue
                     link = canonicalize_wechat_article_url(article["link"])
-                except ValueError:
+                    digest = str(article.get("digest", "") or "")
+                    update_time = article["update_time"]
+                    if update_time < cutoff:
+                        diagnostic["outside_window"] += 1
+                        continue
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    # One malformed article must not discard valid articles or
+                    # prevent the remaining subscriptions from being scanned.
                     diagnostic["invalid"] += 1
-                    continue
-                if article["update_time"] < cutoff:
-                    diagnostic["outside_window"] += 1
                     continue
                 account_articles.append(
                     {
                         "title": article["title"],
                         "link": link,
-                        "digest": article["digest"],
+                        "digest": digest,
                         "account": name or alias,
                         "account_id": alias or biz,
-                        "update_time": article["update_time"],
+                        "update_time": update_time,
                     }
                 )
                 diagnostic["recent"] += 1
