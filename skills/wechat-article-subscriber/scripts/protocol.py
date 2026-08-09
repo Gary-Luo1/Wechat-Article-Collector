@@ -11,8 +11,15 @@ NEXT_ACTIONS = {
     "WECHAT_TOKEN_EXPIRED": "refresh_wechat_credentials",
     "WECHAT_COOKIE_EXPIRED": "refresh_wechat_credentials",
     "WECHAT_CREDENTIAL_CONTEXT_INVALID": "refresh_from_cgi_bin_home",
+    "WECHAT_ACCESS_RESTRICTED": "wait_before_retry",
     "WECHAT_RATE_LIMITED": "wait_before_retry",
     "WECHAT_API_ERROR": "inspect_wechat_diagnostics",
+    "ARTICLE_RISK_CONTROL": "wait_before_retry",
+    "ARTICLE_TRANSIENT": "retry_with_backoff",
+    "ARTICLE_HTTP_ERROR": "open_article_in_wechat",
+    "ARTICLE_CONTENT_INVALID": "open_article_in_wechat",
+    "ARTICLE_RESPONSE_TOO_LARGE": "open_article_in_wechat",
+    "ARTICLE_READ_REQUIRED": "read_article_before_completion",
     "ARTICLE_NOT_FOUND": "show_article_inbox",
     "ARTICLE_PUBLISHER_UNKNOWN": "ask_user_for_publisher_then_apply_policy",
     "SUBSCRIPTION_CONFIRMATION_REQUIRED": "ask_user_whether_to_add_subscription",
@@ -37,6 +44,9 @@ def success(data: Any = None, *, next_action: str = "none", meta: dict | None = 
 
 
 def classify_exception(exc: Exception) -> tuple[str, bool]:
+    code = getattr(exc, "code", "")
+    if isinstance(code, str) and (code.startswith("ARTICLE_") or code.startswith("WECHAT_")):
+        return code, bool(getattr(exc, "retryable", False))
     name = type(exc).__name__
     if name == "ConfigError":
         return "CONFIG_ERROR", False
@@ -46,6 +56,8 @@ def classify_exception(exc: Exception) -> tuple[str, bool]:
         return "WECHAT_COOKIE_EXPIRED", False
     if name == "WeChatCredentialContextError":
         return "WECHAT_CREDENTIAL_CONTEXT_INVALID", False
+    if name == "WeChatAccessRestricted":
+        return "WECHAT_ACCESS_RESTRICTED", False
     if name == "WeChatRateLimitError":
         return "WECHAT_RATE_LIMITED", True
     if name == "WeChatAPIError":
@@ -86,7 +98,10 @@ def failure(exc: Exception, *, message: str | None = None) -> dict:
             "next_action": NEXT_ACTIONS.get(code, "inspect_command_help"),
         },
     }
-    if code in {"ARTICLE_PUBLISHER_UNKNOWN", "SUBSCRIPTION_CONFIRMATION_REQUIRED"}:
+    if code.startswith(("ARTICLE_", "WECHAT_")) or code in {
+        "ARTICLE_PUBLISHER_UNKNOWN",
+        "SUBSCRIPTION_CONFIRMATION_REQUIRED",
+    }:
         details = getattr(exc, "details", None)
         if isinstance(details, dict):
             envelope["error"]["details"] = details

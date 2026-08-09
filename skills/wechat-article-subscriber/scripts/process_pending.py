@@ -20,6 +20,7 @@ from bitable_client import (
 from config_store import DEFAULT_CONFIG, ConfigError, load_config, modify_config, update_health
 from execution_policy import autopilot_policy, invalidate_for_feishu_change
 from feishu_target import production_feishu_target
+from http_client import RequestPacer, new_session
 from protocol import dump, failure, success
 from queue_helpers import (
     cleanup_processed,
@@ -30,6 +31,8 @@ from queue_helpers import (
     add_pending,
     pending_sync_entries,
     read_queue,
+    has_verified_read,
+    record_verified_read,
     resolve_pending,
     restore_dismissed,
     update_inbox_item,
@@ -75,6 +78,32 @@ class SubscriptionConfirmationRequired(ValueError):
             "the article publisher is not subscribed; ask the user whether to add it"
         )
         self.details = details
+
+
+class ArticleReadRequiredError(ValueError):
+    """A scoreable article must have been read in a prior command invocation."""
+
+    code = "ARTICLE_READ_REQUIRED"
+    retryable = False
+    next_action = "read_article_before_completion"
+
+    def __init__(self) -> None:
+        super().__init__("read the article successfully before scoring or completing it")
+
+
+class BatchRiskControlError(ValueError):
+    """Expose a safe, structured stop point for automated batch readers."""
+
+    code = "ARTICLE_RISK_CONTROL"
+    retryable = False
+    next_action = "wait_before_retry"
+
+    def __init__(self, article: dict[str, Any], successful: int) -> None:
+        super().__init__(f"WeChat risk control stopped the batch after {successful} successful article(s)")
+        self.details = {
+            "blocked_url": str(article.get("link", "")),
+            "successful": successful,
+        }
 
 
 def _resolve(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -196,17 +225,28 @@ def cmd_digest_plan(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def _print_article(article: dict[str, Any]) -> tuple[str | None, bool]:
+def _configured_request_delay() -> float:
+    try:
+        return float(load_config()["settings"]["request_delay"])
+    except ConfigError:
+        return float(DEFAULT_CONFIG["settings"]["request_delay"])
+
+
+def _print_article(
+    article: dict[str, Any],
+    *,
+    session: Any | None = None,
+    pacer: RequestPacer | None = None,
+) -> tuple[str, bool]:
     print(f"Title: {article.get('title', '')}")
     print(f"Account: {article.get('account', '')}")
     print(f"URL: {article.get('link', '')}")
     print(f"Digest: {article.get('digest', '')}")
     print("\n--- BEGIN UNTRUSTED ARTICLE CONTENT ---")
-    text = fetch_article_text(str(article["link"]))
-    if text:
-        print(text)
-    else:
-        print("[Article text unavailable]")
+    document = fetch_article(str(article["link"]), session=session, pacer=pacer)
+    text = str(document["text"])
+    record_verified_read(str(article["link"]), text)
+    print(text)
     print("--- END UNTRUSTED ARTICLE CONTENT ---")
     suspected = is_advertisement(str(article.get("title", "")), text or "")
     print(f"Ad heuristic: {'suspected' if suspected else 'not detected'}")
@@ -214,20 +254,43 @@ def _print_article(article: dict[str, Any]) -> tuple[str | None, bool]:
 
 
 def cmd_read(arguments: argparse.Namespace) -> int:
-    _print_article(_resolve(arguments))
+    _print_article(
+        _resolve(arguments),
+        pacer=RequestPacer(_configured_request_delay()),
+    )
     return 0
 
 
 def cmd_batch_read(limit: int) -> int:
+    from article_reader import ArticleFetchError, WeChatRiskControlError
+
     pending = get_pending()
     if not pending:
         print("No pending articles")
         return 0
-    for index, article in enumerate(pending[:limit], start=1):
-        print(f"\n===== ARTICLE {index}/{min(limit, len(pending))} =====")
-        _print_article(article)
+    requested = min(limit, len(pending))
+    successful = 0
+    failures = 0
+    session = new_session()
+    pacer = RequestPacer(_configured_request_delay())
+    try:
+        for index, article in enumerate(pending[:limit], start=1):
+            print(f"\n===== ARTICLE {index}/{requested} =====")
+            try:
+                _print_article(article, session=session, pacer=pacer)
+                successful += 1
+            except WeChatRiskControlError as exc:
+                raise BatchRiskControlError(article, successful) from exc
+            except ArticleFetchError as exc:
+                failures += 1
+                print(f"[Article read failed: {exc.code}]")
+    finally:
+        session.close()
     if len(pending) > limit:
         print(f"Stopped at --limit {limit}; {len(pending) - limit} articles remain")
+    if failures:
+        print(f"Batch read completed with {failures} failed article(s); {successful} succeeded")
+        return 1
     return 0
 
 
@@ -415,6 +478,8 @@ def cmd_done(arguments: argparse.Namespace) -> int:
         )
         print(f"Skipped advertisement: {article.get('title', '')}")
         return 0
+    if not has_verified_read(article):
+        raise ArticleReadRequiredError()
     try:
         config = load_config()
     except ConfigError:

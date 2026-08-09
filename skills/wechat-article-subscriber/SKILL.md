@@ -86,7 +86,7 @@ Never pass `--subscribe` unless the user explicitly answered yes in the current 
     bash scripts/run.sh process --format json digest-plan --hours 24 --limit 5
    ```
 
-8. Read by stable URL, score every non-ad article across exactly five dimensions from [references/scoring.md](references/scoring.md), and complete it. Use a temporary UTF-8 `--dims-file`; do not put large JSON on the shell command line. `done` automatically syncs qualified articles when the persisted policy allows it.
+8. Read by stable URL, then score every non-ad article across exactly five dimensions from [references/scoring.md](references/scoring.md), and complete it. A successful `read` stores only a bounded local proof of the full text; `done` rejects unread non-ad articles and does not write Feishu. Use a temporary UTF-8 `--dims-file`; do not put large JSON on the shell command line. `done` automatically syncs qualified articles when the persisted policy allows it.
 
    ```text
     bash scripts/run.sh process read --link <URL>
@@ -95,7 +95,7 @@ Never pass `--subscribe` unless the user explicitly answered yes in the current 
     bash scripts/run.sh process done --link <URL> --ad
    ```
 
-9. Continue through the requested batch and retry transient failures within the existing scope. Preserve failed Feishu writes locally for repair. Pause and ask only for OAuth/device completion, unresolved identity/account ambiguity, expired credentials, new scopes, changed App/identity/manager/target/schema, a forced below-threshold write, or a destructive action. Never interpret an unchanged failure as permission to broaden scope.
+9. Direct reads use the configured request delay. A batch stops immediately on WeChat risk control; retry only explicit transient failures, then report partial progress. Discovery queues each successfully processed account before moving to the next, so a later blocking failure does not discard prior articles. Preserve failed Feishu writes locally for repair. Pause and ask only for OAuth/device completion, unresolved identity/account ambiguity, expired credentials, new scopes, changed App/identity/manager/target/schema, a forced below-threshold write, or a destructive action. Never interpret an unchanged failure as permission to broaden scope.
 
    ```text
     bash scripts/run.sh process sync-feishu --all

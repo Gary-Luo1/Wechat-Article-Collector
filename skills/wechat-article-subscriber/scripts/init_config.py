@@ -200,6 +200,11 @@ def _normalize_subscriptions(value: Any) -> list[dict[str, str]]:
     return normalized
 
 
+def _reset_health(config: dict[str, Any], section: str) -> None:
+    """Reset one health section back to its default state."""
+    config["health"][section] = deepcopy(DEFAULT_CONFIG["health"][section])
+
+
 def _cookie_names(cookie: str) -> set[str]:
     names: set[str] = set()
     for part in cookie.split(";"):
@@ -651,9 +656,7 @@ def config_from_agent_payload(
         config["subscriptions"] = _normalize_subscriptions(
             payload.get("subscriptions")
         )
-        config["health"]["subscriptions"] = deepcopy(
-            DEFAULT_CONFIG["health"]["subscriptions"]
-        )
+        _reset_health(config, "subscriptions")
     elif existing is None:
         # First-time setup still requires a non-empty subscription list.
         config["subscriptions"] = _normalize_subscriptions(
@@ -763,13 +766,11 @@ def _apply_section_patch(
         token = _required_string(payload, "wechat_token")
         _warn_credential_shape(cookie, token)
         config["wechat"] = {"cookie": cookie, "token": token}
-        config["health"]["wechat"] = deepcopy(DEFAULT_CONFIG["health"]["wechat"])
+        _reset_health(config, "wechat")
     elif section == "subscriptions":
         value = payload.get("subscriptions") if isinstance(payload, dict) else payload
         config["subscriptions"] = _normalize_subscriptions(value)
-        config["health"]["subscriptions"] = deepcopy(
-            DEFAULT_CONFIG["health"]["subscriptions"]
-        )
+        _reset_health(config, "subscriptions")
     elif section == "settings":
         if not isinstance(payload, dict):
             raise ConfigError("settings must be an object")

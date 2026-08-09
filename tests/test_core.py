@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import pytest
+import requests
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,15 +23,23 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("WECHAT_ARTICLE_HOME", str(tmp_path / "state"))
 
 
-def article(letter: str, *, query: str = "") -> dict:
+def article(letter: str, *, query: str = "", verified: bool = True) -> dict:
     suffix = f"?__biz=b&mid={letter}&sn={letter}{query}" if query else f"/{letter}"
-    return {
+    value = {
         "title": f"Article {letter}",
         "link": f"https://mp.weixin.qq.com/s{suffix}",
         "digest": f"Digest {letter}",
         "account": "Example",
         "update_time": 1_700_000_000,
     }
+    if verified:
+        text = f"Verified article {letter}"
+        value["read_state"] = {
+            "status": "verified",
+            "verified_at": "2026-08-08T00:00:00+00:00",
+            "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        }
+    return value
 
 
 def test_feishu_target_owns_cli_check_preflight_and_sync_calls():
@@ -498,6 +509,157 @@ class TestReader:
             ) == "ok"
         assert get.call_args.args[1] == "https://mp.weixin.qq.com/s/test"
 
+    def test_fetch_stops_on_risk_control_page_without_retry(self):
+        import article_reader
+
+        response = mock.Mock()
+        response.headers = {}
+        response.encoding = "utf-8"
+        response.apparent_encoding = "utf-8"
+        response.iter_content.return_value = [
+            (
+                "<html><head><title>环境异常</title></head>"
+                "<body>当前环境异常，请使用微信客户端打开</body></html>"
+            ).encode("utf-8")
+        ]
+        response.raise_for_status.return_value = None
+        with mock.patch.object(
+            article_reader, "_get_with_safe_redirects", return_value=response
+        ) as get:
+            with pytest.raises(article_reader.WeChatRiskControlError):
+                article_reader.fetch_article("https://mp.weixin.qq.com/s/test", retries=2)
+        get.assert_called_once()
+
+    def test_fetch_rejects_risk_control_marker_inside_article_container(self):
+        import article_reader
+
+        response = mock.Mock()
+        response.headers = {}
+        response.encoding = "utf-8"
+        response.apparent_encoding = "utf-8"
+        response.iter_content.return_value = [
+            '<html><div id="js_content">当前环境异常，请在微信客户端打开</div></html>'.encode(
+                "utf-8"
+            )
+        ]
+        response.raise_for_status.return_value = None
+        with mock.patch.object(
+            article_reader, "_get_with_safe_redirects", return_value=response
+        ) as get, pytest.raises(article_reader.WeChatRiskControlError):
+            article_reader.fetch_article("https://mp.weixin.qq.com/s/test", retries=2)
+        get.assert_called_once()
+
+    def test_fetch_does_not_retry_invalid_article_content(self):
+        import article_reader
+
+        response = mock.Mock()
+        response.headers = {}
+        response.encoding = "utf-8"
+        response.apparent_encoding = "utf-8"
+        response.iter_content.return_value = [b"<html><body>not an article</body></html>"]
+        response.raise_for_status.return_value = None
+        with mock.patch.object(
+            article_reader, "_get_with_safe_redirects", return_value=response
+        ) as get, pytest.raises(article_reader.ArticleContentError):
+            article_reader.fetch_article("https://mp.weixin.qq.com/s/test", retries=2)
+        get.assert_called_once()
+
+    def test_fetch_retries_transient_connection_then_succeeds(self, monkeypatch):
+        import article_reader
+
+        response = mock.Mock()
+        response.headers = {}
+        response.encoding = "utf-8"
+        response.apparent_encoding = "utf-8"
+        response.iter_content.return_value = [b'<div id="js_content">ok</div>']
+        response.raise_for_status.return_value = None
+        monkeypatch.setattr(article_reader.time, "sleep", lambda _: None)
+        with mock.patch.object(
+            article_reader,
+            "_get_with_safe_redirects",
+            side_effect=[requests.ConnectionError("offline"), response],
+        ) as get:
+            assert article_reader.fetch_article_text(
+                "https://mp.weixin.qq.com/s/test", retries=1
+            ) == "ok"
+        assert get.call_count == 2
+
+    @pytest.mark.parametrize("status_code", [403, 429])
+    def test_fetch_stops_on_blocked_http_status_without_retry(self, status_code):
+        import article_reader
+
+        response = mock.Mock()
+        response.status_code = status_code
+        response.headers = {}
+        with mock.patch.object(
+            article_reader, "_get_with_safe_redirects", return_value=response
+        ) as get:
+            with pytest.raises(article_reader.WeChatRiskControlError):
+                article_reader.fetch_article("https://mp.weixin.qq.com/s/test", retries=2)
+        get.assert_called_once()
+
+    def test_http_client_impersonates_chrome_when_available(self):
+        import http_client
+
+        fake_session = mock.Mock()
+        with mock.patch.object(http_client, "CURL_CFFI_AVAILABLE", True), mock.patch.object(
+            http_client, "curl_requests"
+        ) as curl_requests:
+            curl_requests.Session.return_value = fake_session
+            assert http_client.new_session() is fake_session
+            curl_requests.Session.assert_called_once_with(impersonate="chrome")
+
+    def test_http_client_falls_back_to_requests(self):
+        import http_client
+        import requests
+
+        with mock.patch.object(http_client, "CURL_CFFI_AVAILABLE", False):
+            session = http_client.new_session()
+        assert isinstance(session, requests.Session)
+
+    def test_http_client_risk_marker_detection(self):
+        import http_client
+
+        assert http_client.looks_like_risk_control(
+            "当前环境异常，请使用微信客户端打开"
+        )
+        assert not http_client.looks_like_risk_control(
+            '<html><div id="js_content">正文</div></html>'
+        )
+
+    def test_request_pacer_delays_only_after_first_request(self, monkeypatch):
+        import http_client
+
+        monotonic = mock.Mock(side_effect=[0.0, 0.5, 1.0])
+        sleep = mock.Mock()
+        monkeypatch.setattr(http_client.time, "monotonic", monotonic)
+        monkeypatch.setattr(http_client.time, "sleep", sleep)
+        pacer = http_client.RequestPacer(1)
+        pacer.wait()
+        pacer.wait()
+        sleep.assert_called_once_with(0.5)
+
+    def test_redirect_detection_works_without_requests_style_flags(self):
+        import article_reader
+
+        session = mock.Mock()
+        first = mock.Mock()
+        first.headers = {"Location": "https://mp.weixin.qq.com/s/next"}
+        second = mock.Mock()
+        second.headers = {}
+        second.is_redirect = False
+        second.is_permanent_redirect = False
+        session.get.side_effect = [first, second]
+        response = article_reader._get_with_safe_redirects(
+            session,
+            "https://mp.weixin.qq.com/s/start",
+            headers={},
+            timeout=30,
+        )
+        assert response is second
+        assert session.get.call_count == 2
+        first.close.assert_called_once()
+
 
 class TestWeChatAPI:
     def test_format_article(self):
@@ -528,12 +690,17 @@ class TestWeChatAPI:
         assert api.get_account(name="Wanted") is None
 
     def test_expired_token_mapping(self):
+        from protocol import failure
         from wechat_api import WeChatAPI, WeChatTokenExpired
 
-        with pytest.raises(WeChatTokenExpired):
+        with pytest.raises(WeChatTokenExpired) as error:
             WeChatAPI._raise_api_error(
-                {"base_resp": {"ret": 200003, "err_msg": "expired"}}, "test"
+                {"base_resp": {"ret": 200003, "err_msg": "expired"}}, "article_listing"
             )
+        assert failure(error.value)["error"]["details"] == {
+            "operation": "article_listing",
+            "api_ret": 200003,
+        }
 
     def test_invalid_args_distinguishes_incomplete_cookie(self):
         from wechat_api import WeChatAPI, WeChatCredentialContextError
@@ -544,6 +711,47 @@ class TestWeChatAPI:
                 "test",
                 {"sessionid"},
             )
+
+    def test_http_429_stops_without_retry(self):
+        from wechat_api import WeChatAPI, WeChatRateLimitError
+
+        api = WeChatAPI("cookie=1; rand_info=2", "token")
+        response = mock.Mock()
+        response.status_code = 429
+        api.session.get = mock.Mock(return_value=response)
+        with pytest.raises(WeChatRateLimitError):
+            api._get("https://mp.weixin.qq.com/cgi-bin/appmsg", {"action": "list_ex"})
+        api.session.get.assert_called_once()
+
+    def test_article_listing_http_403_is_access_restricted_with_safe_details(self):
+        from protocol import failure
+        from wechat_api import WeChatAPI, WeChatAccessRestricted
+
+        api = WeChatAPI("cookie=secret", "secret-token")
+        response = mock.Mock()
+        response.status_code = 403
+        api.session.get = mock.Mock(return_value=response)
+
+        with pytest.raises(WeChatAccessRestricted) as error:
+            api.list_articles("biz")
+
+        payload = failure(error.value)
+        assert payload["error"]["code"] == "WECHAT_ACCESS_RESTRICTED"
+        assert payload["error"]["retryable"] is False
+        assert payload["error"]["details"] == {
+            "operation": "article_listing",
+            "http_status": 403,
+        }
+        assert "secret" not in json.dumps(payload)
+
+    def test_session_headers_include_browser_signals(self):
+        from wechat_api import WeChatAPI
+
+        api = WeChatAPI("cookie=1; rand_info=2", "token")
+        assert api.session.headers["Referer"] == "https://mp.weixin.qq.com/"
+        assert api.session.headers["Accept-Language"].startswith("zh-CN")
+        assert api.session.headers["X-Requested-With"] == "XMLHttpRequest"
+        assert api.session.headers["Cookie"] == "cookie=1; rand_info=2"
 
 
 class TestBitable:
@@ -1016,6 +1224,107 @@ class TestProcess:
         processed = next(iter(read_queue()["processed"].values()))
         assert processed["sync_status"] == "not_requested"
 
+    def test_read_records_proof_then_allows_completion(self):
+        import process_pending
+        from queue_helpers import add_pending, read_queue
+
+        item = article("a", verified=False)
+        add_pending([item])
+        with mock.patch.object(
+            process_pending,
+            "fetch_article",
+            return_value={"text": "full article text"},
+        ):
+            assert process_pending.main(["read", "--link", item["link"]]) == 0
+        pending = read_queue()["pending"][0]
+        assert pending["read_state"]["status"] == "verified"
+        assert process_pending.main(
+            ["done", "--link", item["link"], "--dims", self.dims()]
+        ) == 0
+
+    def test_failed_reread_keeps_existing_verified_proof(self):
+        import process_pending
+        from article_reader import ArticleContentError
+        from queue_helpers import add_pending, read_queue
+
+        item = article("a")
+        add_pending([item])
+        original = read_queue()["pending"][0]["read_state"]
+        with mock.patch.object(
+            process_pending,
+            "fetch_article",
+            side_effect=ArticleContentError("invalid article"),
+        ):
+            assert process_pending.main(["read", "--link", item["link"]]) == 1
+        assert read_queue()["pending"][0]["read_state"] == original
+
+    def test_unread_article_cannot_complete_or_sync(self, capsys):
+        import process_pending
+        from queue_helpers import add_pending, read_queue
+
+        self.valid_config(feishu=True)
+        item = article("a", verified=False)
+        add_pending([item])
+        with mock.patch.object(process_pending, "_sync_entry") as sync:
+            assert process_pending.main(
+                [
+                    "--format",
+                    "json",
+                    "done",
+                    "--link",
+                    item["link"],
+                    "--dims",
+                    self.dims(),
+                    "--feishu",
+                ]
+            ) == 1
+        sync.assert_not_called()
+        assert len(read_queue()["pending"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["error"]["code"] == "ARTICLE_READ_REQUIRED"
+
+    def test_verified_read_and_inbox_update_are_concurrently_preserved(self):
+        from queue_helpers import add_pending, read_queue, record_verified_read, update_inbox_item
+
+        item = article("a", verified=False)
+        add_pending([item])
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            read = executor.submit(record_verified_read, item["link"], "full article")
+            inbox = executor.submit(update_inbox_item, item["link"], favorite=True)
+            read.result()
+            inbox.result()
+        saved = read_queue()["pending"][0]
+        assert saved["read_state"]["status"] == "verified"
+        assert saved["favorite"] is True
+
+    def test_batch_stops_on_risk_control_with_machine_readable_progress(self, capsys):
+        import process_pending
+        from article_reader import WeChatRiskControlError
+        from queue_helpers import add_pending
+
+        self.valid_config()
+        items = [
+            article("a", verified=False),
+            article("b", verified=False),
+            article("c", verified=False),
+        ]
+        add_pending(items)
+        session = mock.Mock()
+        with mock.patch.object(process_pending, "new_session", return_value=session), mock.patch.object(
+            process_pending,
+            "fetch_article",
+            side_effect=[{"text": "first"}, WeChatRiskControlError("blocked")],
+        ) as fetch:
+            assert process_pending.main(["--format", "json", "batch-read", "--limit", "3"]) == 1
+        assert fetch.call_count == 2
+        session.close.assert_called_once()
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["error"]["code"] == "ARTICLE_RISK_CONTROL"
+        assert payload["error"]["details"] == {
+            "blocked_url": items[1]["link"],
+            "successful": 1,
+        }
+
     def test_cmd_done_after_dismiss_returns_clean_error(self, capsys):
         import process_pending
         from queue_helpers import add_pending, dismiss_article
@@ -1163,7 +1472,7 @@ class TestProcess:
         from process_pending import main
         from queue_helpers import add_pending, read_queue
 
-        add_pending([article("a")])
+        add_pending([article("a", verified=False)])
         result = main(
             [
                 "done",

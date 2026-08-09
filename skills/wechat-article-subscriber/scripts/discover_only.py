@@ -5,17 +5,18 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
-from article_inbox import known_urls
 from config_store import ConfigError, load_config, modify_config, update_health
 from protocol import dump, failure, success
-from queue_helpers import add_pending, cleanup_processed, normalize_url
+from queue_helpers import add_pending, cleanup_processed
 from subscription_resolution import exact_matches, sanitize_candidates, subscription_query
+from url_identity import canonicalize_wechat_article_url
 from wechat_api import (
     WeChatAPI,
+    WeChatAccessRestricted,
     WeChatAPIError,
     WeChatCookieExpired,
     WeChatCredentialContextError,
@@ -118,6 +119,7 @@ def discover_articles(
     hours: float,
     config_path: Path | None = None,
     diagnostics: list[dict] | None = None,
+    on_account_articles: Callable[[list[dict]], int] | None = None,
 ) -> list[dict]:
     wechat = config["wechat"]
     settings = config["settings"]
@@ -128,8 +130,6 @@ def discover_articles(
     )
     cutoff = time.time() - hours * 3600
     discovered: list[dict] = []
-    config_changed = False
-    pending_biz: list[tuple[tuple[str, str, str], str]] = []
     for subscription in config["subscriptions"]:
         name = str(subscription.get("name", "")).strip()
         alias = str(subscription.get("alias", "")).strip()
@@ -140,77 +140,93 @@ def discover_articles(
             "fetched": 0,
             "recent": 0,
             "outside_window": 0,
+            "invalid": 0,
+            "queued": 0,
         }
-        if not biz:
-            account = api.get_account(name=name, alias=alias)
-            if not account:
-                logger.warning("No exact account match for %s; skipping", alias or name)
-                diagnostic["status"] = "unresolved"
-                if diagnostics is not None:
-                    diagnostics.append(diagnostic)
-                continue
-            biz = str(account.get("fakeid", ""))
+        try:
             if not biz:
-                logger.warning("Account %s has no fakeid; skipping", alias or name)
-                diagnostic["status"] = "missing_biz"
-                if diagnostics is not None:
-                    diagnostics.append(diagnostic)
-                continue
-            pending_biz.append(
-                (
-                    (name, alias, ""),
-                    biz,
-                )
-            )
-            subscription["biz"] = biz
-            config_changed = True
-        limit = int(settings["max_articles_per_account"])
-        begin = 0
-        articles: list[dict] = []
-        while len(articles) < limit:
-            batch, _ = api.list_articles(biz, begin=begin, count=min(5, limit - len(articles)))
-            articles.extend(batch)
-            if len(batch) < 5 or not batch:
-                break
-            if int(batch[-1].get("update_time", 0) or 0) < cutoff:
-                break
-            begin += len(batch)
-        diagnostic["fetched"] = len(articles[:limit])
-        for raw in articles[:limit]:
-            article = api.format_article(raw)
-            if not article["title"] or not article["link"]:
-                continue
-            if article["update_time"] < cutoff:
-                diagnostic["outside_window"] += 1
-                continue
-            discovered.append(
-                {
-                    "title": article["title"],
-                    "link": article["link"],
-                    "digest": article["digest"],
-                    "account": name or alias,
-                    "account_id": alias or biz,
-                    "update_time": article["update_time"],
-                }
-            )
-            diagnostic["recent"] += 1
-        diagnostic["status"] = "ok"
-        if diagnostics is not None:
-            diagnostics.append(diagnostic)
-    if config_changed:
-        def mutate(config: dict) -> dict:
-            for original, resolved_biz in pending_biz:
-                for sub in config["subscriptions"]:
-                    if (
-                        str(sub.get("name", "")).strip(),
-                        str(sub.get("alias", "")).strip(),
-                        str(sub.get("biz", "")).strip(),
-                    ) == original:
-                        sub["biz"] = resolved_biz
-                        break
-            return config
+                account = api.get_account(name=name, alias=alias)
+                if not account:
+                    logger.warning("No exact account match for %s; skipping", alias or name)
+                    diagnostic["status"] = "unresolved"
+                    if diagnostics is not None:
+                        diagnostics.append(diagnostic)
+                    continue
+                biz = str(account.get("fakeid", ""))
+                if not biz:
+                    logger.warning("Account %s has no fakeid; skipping", alias or name)
+                    diagnostic["status"] = "missing_biz"
+                    if diagnostics is not None:
+                        diagnostics.append(diagnostic)
+                    continue
+                original = (name, alias, "")
 
-        modify_config(mutate, path=config_path)
+                def mutate(saved: dict) -> dict:
+                    for sub in saved["subscriptions"]:
+                        if (
+                            str(sub.get("name", "")).strip(),
+                            str(sub.get("alias", "")).strip(),
+                            str(sub.get("biz", "")).strip(),
+                        ) == original:
+                            sub["biz"] = biz
+                            break
+                    return saved
+
+                modify_config(mutate, path=config_path)
+                subscription["biz"] = biz
+            limit = int(settings["max_articles_per_account"])
+            begin = 0
+            articles: list[dict] = []
+            while len(articles) < limit:
+                batch, _ = api.list_articles(
+                    biz, begin=begin, count=min(5, limit - len(articles))
+                )
+                articles.extend(batch)
+                if len(batch) < 5 or not batch:
+                    break
+                if int(batch[-1].get("update_time", 0) or 0) < cutoff:
+                    break
+                begin += len(batch)
+            diagnostic["fetched"] = len(articles[:limit])
+            account_articles: list[dict] = []
+            for raw in articles[:limit]:
+                article = api.format_article(raw)
+                if not article["title"] or not article["link"]:
+                    diagnostic["invalid"] += 1
+                    continue
+                try:
+                    link = canonicalize_wechat_article_url(article["link"])
+                except ValueError:
+                    diagnostic["invalid"] += 1
+                    continue
+                if article["update_time"] < cutoff:
+                    diagnostic["outside_window"] += 1
+                    continue
+                account_articles.append(
+                    {
+                        "title": article["title"],
+                        "link": link,
+                        "digest": article["digest"],
+                        "account": name or alias,
+                        "account_id": alias or biz,
+                        "update_time": article["update_time"],
+                    }
+                )
+                diagnostic["recent"] += 1
+            if on_account_articles is not None:
+                diagnostic["queued"] = on_account_articles(account_articles)
+            discovered.extend(account_articles)
+            diagnostic["status"] = "ok"
+            if diagnostics is not None:
+                diagnostics.append(diagnostic)
+        except (WeChatTokenExpired, WeChatCookieExpired, WeChatCredentialContextError,
+                WeChatAccessRestricted,
+                WeChatRateLimitError, WeChatAPIError) as exc:
+            diagnostic["status"] = "blocked"
+            diagnostic["error"] = type(exc).__name__
+            if diagnostics is not None:
+                diagnostics.append(diagnostic)
+            raise
     return discovered
 
 
@@ -225,10 +241,45 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     json_output = arguments.format == "json"
     config = None
+    diagnostics: list[dict] = []
+    queued = 0
+
+    def partial_meta() -> dict:
+        completed_accounts = sum(item.get("status") == "ok" for item in diagnostics)
+        return {
+            "partial": bool(completed_accounts or queued),
+            "queued": queued,
+            "completed_accounts": completed_accounts,
+            "skipped_invalid": sum(int(item.get("invalid", 0)) for item in diagnostics),
+            "blocking_account": next(
+                (item.get("account", "") for item in diagnostics if item.get("status") == "blocked"),
+                "",
+            ),
+        }
+
+    def report_failure(exc: Exception) -> None:
+        if json_output:
+            envelope = failure(exc)
+            envelope["meta"] = partial_meta()
+            print(dump(envelope))
+        else:
+            meta = partial_meta()
+            logger.error(
+                "%s (partial=%s, queued=%s, blocking_account=%s)",
+                exc,
+                meta["partial"],
+                meta["queued"],
+                meta["blocking_account"],
+            )
+
     try:
         config = load_config(arguments.config, require_wechat=True)
         if arguments.check_token:
-            api = WeChatAPI(config["wechat"]["cookie"], config["wechat"]["token"])
+            api = WeChatAPI(
+                config["wechat"]["cookie"],
+                config["wechat"]["token"],
+                request_delay=config["settings"]["request_delay"],
+            )
             api.search_account("微信", count=1)
             config = update_health("wechat", success=True, path=arguments.config)
             data = {"credentials": "valid", "last_verified": config["health"]["wechat"]}
@@ -260,19 +311,21 @@ def main(argv: list[str] | None = None) -> int:
         if not config["subscriptions"]:
             raise ConfigError("no subscriptions configured")
         hours = arguments.hours or float(config["settings"]["check_hours"])
-        diagnostics: list[dict] = []
-        articles = discover_articles(config, hours, arguments.config, diagnostics)
-        existing_urls = known_urls()
-        for diagnostic in diagnostics:
-            account = diagnostic["account"]
-            diagnostic["new_candidates"] = sum(
-                item.get("account") == account
-                and normalize_url(item["link"]) not in existing_urls
-                for item in articles
+        def persist_account(articles: list[dict]) -> int:
+            nonlocal queued
+            added = add_pending(
+                articles,
+                content_dedup=bool(config["settings"]["content_dedup"]),
             )
-        added = add_pending(
-            articles,
-            content_dedup=bool(config["settings"]["content_dedup"]),
+            queued += added
+            return added
+
+        articles = discover_articles(
+            config,
+            hours,
+            arguments.config,
+            diagnostics,
+            persist_account,
         )
         cleanup_processed()
         try:
@@ -282,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         data = {
             "hours": hours,
             "discovered": len(articles),
-            "queued": added,
+            "queued": queued,
             "accounts": diagnostics,
         }
         if json_output:
@@ -291,17 +344,18 @@ def main(argv: list[str] | None = None) -> int:
             for item in diagnostics:
                 print(
                     f"{item['account']}: {item['status']}; fetched={item['fetched']}; "
-                    f"recent={item['recent']}; new={item.get('new_candidates', 0)}"
+                    f"recent={item['recent']}; queued={item['queued']}; "
+                    f"invalid={item['invalid']}"
                 )
-            print(f"Discovered {len(articles)} recent articles; queued {added} new articles")
+            print(f"Discovered {len(articles)} recent articles; queued {queued} new articles")
         return 0
-    except (WeChatTokenExpired, WeChatCookieExpired) as exc:
+    except (WeChatTokenExpired, WeChatCookieExpired, WeChatAccessRestricted) as exc:
         if config is not None:
             try:
                 update_health("wechat", success=False, failure_kind=type(exc).__name__, path=arguments.config)
             except ConfigError:
                 pass
-        print(dump(failure(exc))) if json_output else logger.error("%s", exc)
+        report_failure(exc)
         return 2
     except WeChatCredentialContextError as exc:
         if config is not None:
@@ -309,10 +363,10 @@ def main(argv: list[str] | None = None) -> int:
                 update_health("wechat", success=False, failure_kind=type(exc).__name__, path=arguments.config)
             except ConfigError:
                 pass
-        print(dump(failure(exc))) if json_output else logger.error("%s", exc)
+        report_failure(exc)
         return 3
     except (ConfigError, WeChatRateLimitError, WeChatAPIError, ValueError) as exc:
-        print(dump(failure(exc))) if json_output else logger.error("%s", exc)
+        report_failure(exc)
         return 1
 
 

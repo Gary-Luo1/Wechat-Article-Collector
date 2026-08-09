@@ -6,8 +6,7 @@ import logging
 import time
 from typing import Optional
 
-import requests
-
+from http_client import is_transient_network_error, new_session
 from url_identity import upgrade_wechat_article_url
 
 
@@ -15,23 +14,39 @@ logger = logging.getLogger(__name__)
 
 
 class WeChatAPIError(RuntimeError):
-    pass
+    code = "WECHAT_API_ERROR"
+    retryable = False
+
+    def __init__(self, message: str, *, details: dict[str, int | str] | None = None):
+        super().__init__(message)
+        self.details = details
 
 
 class WeChatTokenExpired(WeChatAPIError):
-    pass
+    code = "WECHAT_TOKEN_EXPIRED"
 
 
 class WeChatCookieExpired(WeChatAPIError):
-    pass
+    code = "WECHAT_COOKIE_EXPIRED"
 
 
 class WeChatRateLimitError(WeChatAPIError):
-    pass
+    code = "WECHAT_RATE_LIMITED"
+    retryable = True
 
 
 class WeChatCredentialContextError(WeChatAPIError):
-    pass
+    code = "WECHAT_CREDENTIAL_CONTEXT_INVALID"
+
+
+class WeChatAccessRestricted(WeChatAPIError):
+    """WeChat rejected an otherwise authenticated endpoint request."""
+
+    code = "WECHAT_ACCESS_RESTRICTED"
+    retryable = False
+
+    def __init__(self, message: str, *, details: dict[str, int | str]):
+        super().__init__(message, details=details)
 
 
 class WeChatAPI:
@@ -47,15 +62,13 @@ class WeChatAPI:
     ):
         if not cookie.strip() or not token.strip():
             raise ValueError("WeChat cookie and token are required")
-        self.session = requests.Session()
-        self.session.headers.update(
+        self.session = new_session(
             {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
-                ),
-                "Cookie": cookie,
                 "Accept": "application/json,text/plain,*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": "https://mp.weixin.qq.com/",
+                "X-Requested-With": "XMLHttpRequest",
+                "Cookie": cookie,
             }
         )
         self.base_params = {"lang": "zh_CN", "f": "json", "token": token}
@@ -81,6 +94,9 @@ class WeChatAPI:
             pass
         if ret == 0:
             return
+        details: dict[str, int | str] = {"operation": operation}
+        if isinstance(ret, int):
+            details["api_ret"] = ret
         message = str(
             base_response.get("err_msg", data.get("errmsg", data.get("msg", "unknown error")))
         )[:200]
@@ -92,26 +108,42 @@ class WeChatAPI:
                     "WeChat rejected the request because the Cookie appears incomplete "
                     f"(missing {', '.join(missing)}). Sign in at https://mp.weixin.qq.com/, "
                     "open browser developer tools > Application > Storage > Cookies > "
-                    "https://mp.weixin.qq.com/, then copy every cookie row."
+                    "https://mp.weixin.qq.com/, then copy every cookie row.",
+                    details=details,
                 )
             raise WeChatCredentialContextError(
                 "WeChat rejected the credential context. Sign in at "
                 "https://mp.weixin.qq.com/, then refresh the complete cookie set from "
                 "Application storage and the numeric token from the current page URL "
-                "(never /wxamp/), and retry immediately."
+                "(never /wxamp/), and retry immediately.",
+                details=details,
             )
         if ret == 200003 or "token expired" in lower or "invalid token" in lower:
             raise WeChatTokenExpired(
                 "WeChat token expired. Refresh the complete cookie set from Application "
-                "storage and the numeric token from the current authenticated page URL."
+                "storage and the numeric token from the current authenticated page URL.",
+                details=details,
             )
         if ret in {1, 100003, 200013}:
-            raise WeChatCookieExpired("WeChat session expired; sign in again locally")
+            raise WeChatCookieExpired(
+                "WeChat session expired; sign in again locally", details=details
+            )
         if ret in {200002, 200007, 200008}:
-            raise WeChatRateLimitError(f"WeChat rate limited {operation}: {message}")
-        raise WeChatAPIError(f"WeChat {operation} failed ({ret}): {message}")
+            raise WeChatRateLimitError(
+                f"WeChat rate limited {operation}: {message}", details=details
+            )
+        raise WeChatAPIError(
+            f"WeChat {operation} failed ({ret}): {message}", details=details
+        )
 
-    def _get(self, url: str, params: dict, retries: int = 3) -> dict:
+    def _get(
+        self,
+        url: str,
+        params: dict,
+        retries: int = 3,
+        *,
+        operation: str = "wechat_api",
+    ) -> dict:
         merged = {**self.base_params, **params}
         last_error: Exception | None = None
         for attempt in range(retries):
@@ -126,11 +158,22 @@ class WeChatAPI:
                     timeout=(10, 30),
                 )
                 self._last_request_at = time.monotonic()
-                if response.status_code in {401, 403}:
+                if response.status_code == 401:
                     raise WeChatCookieExpired(
                         "WeChat session expired; sign in at https://mp.weixin.qq.com/ and "
                         "refresh the cookie set from Application storage and token from "
-                        "the current authenticated page URL."
+                        "the current authenticated page URL.",
+                        details={"operation": operation, "http_status": 401},
+                    )
+                if response.status_code == 403:
+                    raise WeChatAccessRestricted(
+                        f"WeChat rejected {operation} (HTTP 403)",
+                        details={"operation": operation, "http_status": 403},
+                    )
+                if response.status_code == 429:
+                    raise WeChatRateLimitError(
+                        "WeChat rate limited request: HTTP 429",
+                        details={"operation": operation, "http_status": 429},
                     )
                 response.raise_for_status()
                 try:
@@ -140,15 +183,18 @@ class WeChatAPI:
                         raise WeChatCookieExpired(
                             "WeChat returned a sign-in page; sign in again and refresh "
                             "the cookie set from Application storage and token from the "
-                            "current authenticated page URL."
+                            "current authenticated page URL.",
+                            details={"operation": operation, "response_type": "html"},
                         ) from exc
                     raise
                 if not isinstance(data, dict):
                     raise ValueError("response is not a JSON object")
                 return data
-            except (WeChatCookieExpired, WeChatTokenExpired, WeChatCredentialContextError):
-                raise
-            except (requests.RequestException, ValueError) as exc:
+            except ValueError as exc:
+                raise WeChatAPIError("WeChat returned an invalid API response") from exc
+            except Exception as exc:
+                if not is_transient_network_error(exc):
+                    raise
                 # Do not log exception URLs: the query string contains the token.
                 last_error = exc
                 if attempt < retries - 1:
@@ -168,6 +214,7 @@ class WeChatAPI:
                 "count": str(count),
                 "ajax": "1",
             },
+            operation="account_search",
         )
         self._raise_api_error(data, "account search", self.cookie_names)
         result = data.get("list", [])
@@ -187,6 +234,7 @@ class WeChatAPI:
                 "query": "",
                 "ajax": "1",
             },
+            operation="article_listing",
         )
         self._raise_api_error(data, "article listing", self.cookie_names)
         articles = data.get("app_msg_list", [])

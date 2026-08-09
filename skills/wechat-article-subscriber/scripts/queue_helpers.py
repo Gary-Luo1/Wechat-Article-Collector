@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from contextlib import contextmanager
 from copy import deepcopy
@@ -102,6 +103,17 @@ def _validate_article(article: Any, location: str) -> None:
         raise ValueError(f"{location}.favorite must be boolean")
     if article.get("inbox_state", "active") not in {"active", "later"}:
         raise ValueError(f"{location}.inbox_state must be active or later")
+    read_state = article.get("read_state")
+    if read_state is not None:
+        if not isinstance(read_state, dict):
+            raise ValueError(f"{location}.read_state must be an object")
+        if read_state.get("status") != "verified":
+            raise ValueError(f"{location}.read_state.status must be verified")
+        if not isinstance(read_state.get("verified_at"), str):
+            raise ValueError(f"{location}.read_state.verified_at must be a string")
+        fingerprint = read_state.get("content_sha256")
+        if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise ValueError(f"{location}.read_state.content_sha256 must be a SHA-256 hex digest")
 
 
 def _read_unlocked() -> dict[str, Any]:
@@ -184,6 +196,41 @@ def resolve_pending(*, index: int | None = None, link: str | None = None) -> dic
     if index is None or index < 0 or index >= len(pending):
         raise LookupError(f"article index must be between 1 and {len(pending)}")
     return pending[index]
+
+
+def has_verified_read(article: dict[str, Any]) -> bool:
+    """Return whether an article carries a validated full-text read proof."""
+    state = article.get("read_state")
+    return (
+        isinstance(state, dict)
+        and state.get("status") == "verified"
+        and isinstance(state.get("verified_at"), str)
+        and isinstance(state.get("content_sha256"), str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", state["content_sha256"]))
+    )
+
+
+def record_verified_read(link: str, text: str) -> dict[str, Any]:
+    """Atomically persist bounded proof that a pending article was read."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("article text must be non-empty before recording a verified read")
+    normalized = normalize_url(link)
+    state = {
+        "status": "verified",
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+    with queue_lock():
+        data = _read_unlocked()
+        article = next(
+            (item for item in data["pending"] if item.get("normalized_url") == normalized),
+            None,
+        )
+        if article is None:
+            raise LookupError("article is no longer pending")
+        article["read_state"] = state
+        _write_unlocked(data)
+        return deepcopy(article)
 
 
 def update_inbox_item(

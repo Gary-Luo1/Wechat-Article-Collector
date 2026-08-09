@@ -2,6 +2,14 @@
 
 Use the management command as the first diagnostic boundary. It emits a stable JSON envelope and never returns Cookie, token, Base token, or table ID.
 
+For discovery, `WECHAT_ACCESS_RESTRICTED` means an authenticated endpoint rejected
+the request (for example HTTP 403). `WECHAT_TOKEN_EXPIRED`,
+`WECHAT_COOKIE_EXPIRED`, `WECHAT_CREDENTIAL_CONTEXT_INVALID`, and
+`WECHAT_RATE_LIMITED` use the same safe JSON detail contract: operation name plus
+HTTP status, numeric API return code, or response type. Details never contain a
+Cookie, token, URL, or response body. Access restriction is not retried
+automatically and does not imply that a Cookie has expired.
+
 ```text
 bash scripts/run.sh manage doctor
 bash scripts/run.sh manage doctor --online
@@ -192,6 +200,6 @@ Machine-readable commands return one JSON object:
 {"ok":true,"data":{},"next_action":"none"}
 ```
 
-Failures use `error.code`, a redacted `message`, `retryable`, and `next_action`. Agents should branch on the code, not parse human prose. `process` accepts global formatting before the subcommand: `process --format json list`.
+Failures use `error.code`, a redacted `message`, `retryable`, and `next_action`. Agents should branch on the code, not parse human prose. Article reads distinguish `ARTICLE_RISK_CONTROL`, `ARTICLE_TRANSIENT`, `ARTICLE_HTTP_ERROR`, `ARTICLE_CONTENT_INVALID`, `ARTICLE_RESPONSE_TOO_LARGE`, and `ARTICLE_READ_REQUIRED`; only `ARTICLE_TRANSIENT` is retryable. A failed discovery response can include safe `meta` counts for preserved partial progress. `process` accepts global formatting before the subcommand: `process --format json list`.
 
 Configuration format changes are versioned. The first migration preserves a restricted `config.vN.backup.json`; `manage reset --scope all-data --yes` removes these backups too.

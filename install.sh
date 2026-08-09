@@ -175,7 +175,7 @@ if [ "$INSTALL_DEPS" -eq 1 ]; then
   VENV_COMMITTED=1
   echo "Created isolated runtime at $VENV_DIR"
 else
-  echo "Skipped dependency installation; commands other than setup require requests and beautifulsoup4 in the selected Python runtime."
+  echo "Skipped dependency installation; commands other than setup require requests, beautifulsoup4, and curl_cffi in the selected Python runtime."
 fi
 
 for ((index=0; index<${#KINDS[@]}; index++)); do

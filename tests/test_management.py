@@ -491,7 +491,7 @@ def test_recent_feishu_failure_overrides_stale_success():
         }
     )
     validated = validate_config(config)
-    stage, next_action = manage._next_stage(
+    stage, next_action = manage.next_stage(
         validated,
         cli={"compatible": True, "version": "1.0.69"},
     )
@@ -1633,7 +1633,7 @@ def test_done_uses_persisted_feishu_sync_policy(
 ):
     import process_pending
     from config_store import save_config
-    from queue_helpers import add_pending
+    from queue_helpers import add_pending, record_verified_read
 
     config = configured()
     config["setup"]["execution_policy"].update(
@@ -1656,6 +1656,7 @@ def test_done_uses_persisted_feishu_sync_policy(
     save_config(config)
     document = _direct_article("Example")
     add_pending([document])
+    record_verified_read(document["link"], "verified direct article")
     synced: list[str] = []
     monkeypatch.setattr(
         process_pending,

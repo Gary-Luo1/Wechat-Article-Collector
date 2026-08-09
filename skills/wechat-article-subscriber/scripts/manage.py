@@ -230,7 +230,9 @@ def _progress(
     }
 
 
-_next_stage = next_stage
+def _expected_app_id(config: dict[str, Any]) -> str:
+    """Return the saved Feishu App ID, normalized."""
+    return str(config["feishu"].get("expected_app_id") or "").strip()
 
 
 def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
@@ -358,7 +360,7 @@ def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
         report["online"] = online_report
 
     config = load_config()
-    stage, next_action = _next_stage(config, cli=cli)
+    stage, next_action = next_stage(config, cli=cli)
     report["setup_stage"] = stage
     report["health"] = config["health"]
     report["progress"] = _progress(
@@ -485,7 +487,7 @@ def _import_feishu_host_context(
                 "the current setup already confirms user identity; do not silently switch "
                 "it to the conversational bot"
             )
-        expected_app_id = str(config["feishu"].get("expected_app_id") or "").strip()
+        expected_app_id = _expected_app_id(config)
         if expected_app_id and expected_app_id != app_id:
             raise ValueError(
                 "the current Feishu conversation App ID conflicts with the saved App ID"
@@ -592,9 +594,7 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
             ),
         }, "select_feishu_app"
     if current["feishu"].get("binding_mode") == "agent":
-        expected_app_id = str(
-            current["feishu"].get("expected_app_id") or ""
-        ).strip()
+        expected_app_id = _expected_app_id(current)
         if not expected_app_id:
             return {
                 "identity_required": False,
@@ -621,9 +621,7 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
         # name (e.g. a profile created externally as cli_<app_id>). Resolve by
         # App ID and self-heal when the profile is discoverable; never error when
         # the profile is simply not initialized yet.
-        expected_app_id = str(
-            current["feishu"].get("expected_app_id") or ""
-        ).strip()
+        expected_app_id = _expected_app_id(current)
         profile_resolution = None
         if expected_app_id:
             try:
@@ -780,9 +778,7 @@ def _feishu_local_profile(
             expected_app_id = ""
             private_profile = ""
         else:
-            expected_app_id = str(
-                config["feishu"].get("expected_app_id") or ""
-            ).strip()
+            expected_app_id = _expected_app_id(config)
             private_profile = str(config["feishu"].get("cli_profile") or "").strip()
         matching = [
             item
@@ -809,7 +805,7 @@ def _feishu_local_profile(
     config = load_config()
     if not config["setup"]["feishu_identity_confirmed"]:
         raise ConfigError("confirm Feishu identity before importing a local profile")
-    expected_app_id = str(config["feishu"].get("expected_app_id") or "").strip()
+    expected_app_id = _expected_app_id(config)
     private_profile = str(config["feishu"].get("cli_profile") or "").strip()
     if not expected_app_id or not private_profile:
         raise ConfigError(

@@ -45,7 +45,7 @@ bash install.sh --target agents --no-deps
 .\install.ps1 -Target agents -NoDeps
 ```
 
-With `--no-deps` / `-NoDeps`, `setup` remains available but discovery, reading, and processing require `requests` and `beautifulsoup4` in the selected system Python. On minimal Debian/Ubuntu installations, install the distribution's `python3-venv` package before a normal installation.
+With `--no-deps` / `-NoDeps`, `setup` remains available but discovery, reading, and processing require `requests`, `beautifulsoup4`, and `curl_cffi` in the selected system Python. On minimal Debian/Ubuntu installations, install the distribution's `python3-venv` package before a normal installation.
 
 ## Configure through Agent dialogue
 

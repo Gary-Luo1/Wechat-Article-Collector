@@ -8,6 +8,12 @@
   and http-to-https upgrade) in one stdlib-only module shared by queue,
   discovery, ingestion, parsing, and Feishu records; pure URL validation no
   longer requires the HTML parser dependency.
+- Impersonate a real Chrome TLS/header fingerprint for the private discovery
+  API and article reads via `curl_cffi` when installed, with a plain
+  `requests` fallback for existing runtimes that do not reinstall.
+- Add browser-like `Referer`, `Accept-Language`, and `X-Requested-With`
+  headers, and route `discover --check-token` through the configured request
+  delay instead of firing immediately.
 - Route doctor/status queue statistics and the known-URL dedup query through
   one queue-module interface instead of raw storage reads.
 - Share one cross-platform process lock between the queue and configuration
@@ -21,6 +27,10 @@
 
 - Doctor online checks now report an incompatible lark-cli version as a Feishu
   validation failure instead of bypassing the compatibility check.
+- Article reads stop immediately on WeChat risk-control verification pages
+  (环境异常 / verification markers) and on HTTP 403/429 instead of retrying
+  and compounding the block; the discovery API treats HTTP 429 as an immediate
+  rate-limit stop as well.
 
 ## 2.2.0 - Unreleased
 
