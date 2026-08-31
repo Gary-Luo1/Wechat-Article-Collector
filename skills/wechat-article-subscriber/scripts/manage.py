@@ -77,7 +77,14 @@ ACTION_LABELS = {
     "bind_detected_feishu_bot": "绑定当前飞书会话的机器人应用",
     "repair_local_config_file": "修复本地配置文件中的 JSON 或字段错误",
     "edit_local_config_file": "填写并保存本地配置文件",
+    "run_doctor_online": "在线体检 redfox API 与飞书",
     "run_online_doctor": "在线体检 redfox API 与飞书",
+    "reuse_or_configure_private_lark_profile": "复用或初始化技能私有的 lark-cli 配置",
+    "rerun_feishu_create_base_to_resume": "用相同名称重跑 feishu-create-base 以续接未完成的建表",
+    "configure_existing_feishu_target": "提供目标表格链接以映射现有表格",
+    "inspect_failed_items": "检查失败条目",
+    "process_pending_articles": "处理待读文章",
+    "edit_then_validate_local_config": "编辑并校验本地配置文件",
     "run_redfox_key_setup": "通过 stdin 设置 redfox API Key",
     "confirm_daily_run": "确认以上计划后加 --yes 执行每日发现与简报",
     "collect_redfox_key": "提供 redfox API Key（stdin 或对话内提供皆可）",
@@ -112,7 +119,6 @@ ACTION_LABELS = {
     "configure_private_lark_profile": "在技能私有目录中配置已选飞书应用",
     "provide_app_secret_for_private_profile": "从飞书开放平台复制 App Secret 并经 stdin 初始化私有配置",
     "provision_configured_feishu_base": "自动创建并验证已批准的飞书多维表格",
-    "configure_existing_feishu_target": "配置一个明确的现有飞书目标表格",
     "continue_setup_then_execute": "继续完成配置并自动执行任务",
     "discover_articles": "发现并查看新文章",
 }
@@ -897,6 +903,12 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
             ),
         )
         return state, "resolve_and_save_feishu_manager"
+    if feishu["identity"] == "user" and state["authorization"] == "waiting":
+        state.update(
+            next_question="上一次扫码授权还在等待确认：请完成页面确认；过期就重新发起。",
+            next_command="manage feishu-auth start（完成后 feishu-auth complete）",
+        )
+        return state, "resume_existing_user_base_authorization"
     if feishu["identity"] == "user" and state["authorization"] != "authorized":
         state.update(
             next_question="应用已绑定但密钥/授权未就绪：请提供 App Secret（stdin），随后完成一次扫码授权。",
@@ -940,12 +952,12 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
             ),
         )
         return state, "provision_configured_feishu_base"
-    if not state["target_configured"] and state["destination"] == "create":
+    if not state["target_configured"] and state["destination"] == "existing":
         state.update(
-            next_question="确认创建标准文章表？",
-            next_command="manage feishu-create-base --name 公众号文章 --table-name 文章列表",
+            next_question="请提供目标表格的链接（先只读校验字段，再保存映射）。",
+            next_command="manage feishu-target --url <表格链接>",
         )
-        return state, "provision_configured_feishu_base"
+        return state, "configure_existing_feishu_target"
     state.update(
         next_question=None,
         next_command="manage doctor --online（最终校验）",
@@ -1123,7 +1135,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
     if config["feishu"]["destination"] != "create":
         raise LarkCLIError(
             "Feishu Base creation requires the explicit destination=create choice",
-            kind="confirmation",
+            kind="confirmation_required",
         )
     has_token = bool(str(config["feishu"].get("base_token") or "").strip())
     has_table = bool(str(config["feishu"].get("table_id") or "").strip())
@@ -1567,7 +1579,9 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             "mapped_fields": sorted(feishu["field_mapping"]),
         },
         "estimated_billed_calls": sum(
-            1 for item in subscriptions if not item["cooldown_active"]
+            1
+            for item in subscriptions
+            if item["alias"] and not item["cooldown_active"]
         ),
         "note": "1 list call per subscription outside its cooldown, plus 1 detail call per article read",
     }
@@ -1770,6 +1784,20 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
                     f"expected exactly one subscription matching {selector!r}; "
                     f"found {len(matches)}"
                 )
+            # Same identity rule as add/bulk-add: a duplicate alias would be
+            # billed twice per cycle and make later selectors ambiguous.
+            for item in config["subscriptions"]:
+                if item is matches[0]:
+                    continue
+                taken = {
+                    str(item.get(key, "")).strip().casefold()
+                    for key in ("name", "alias", "biz")
+                }
+                if alias.casefold() in taken:
+                    raise ValueError(
+                        f"alias {alias!r} is already used by subscription "
+                        f"{str(item.get('name') or item.get('alias'))!r}"
+                    )
             matches[0]["alias"] = alias
             return config
 
@@ -1933,7 +1961,7 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
         ]
         removed = len(current_items) - len(retained)
         if not removed:
-            raise LookupError("subscription not found")
+            raise ValueError("subscription not found")
         config["subscriptions"] = retained
         state["removed"] = removed
         state["count"] = len(retained)
@@ -1995,7 +2023,7 @@ def _pipe_cmd(template: str) -> str:
     ASCII secrets (non-ASCII values should use the agent-file inbox instead).
     """
     if os.name == "nt":
-        return template.replace("printf %s '", "'").replace("' | ", "' | ")
+        return template.replace("printf %s '", "'")
     return template
 
 

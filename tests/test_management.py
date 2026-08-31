@@ -436,6 +436,7 @@ def test_recent_feishu_failure_overrides_stale_success():
             "identity": "bot",
             "expected_app_id": "cli_example123",
             "cli_profile": "wechat-article-profile",
+            "manager_open_id": "ou_manager123",
             "base_token": "base_token",
             "table_id": "table_id",
         }

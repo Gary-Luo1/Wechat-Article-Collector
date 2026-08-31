@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -144,6 +145,9 @@ class LarkCLIError(RuntimeError):
 
 
 TESTED_LARK_CLI_VERSION = "1.0.69"
+logger = logging.getLogger(__name__)
+
+
 MIN_LARK_CLI_VERSION = (1, 0, 69)  # tested through 1.0.92 on 2026-08-30
 MAX_LARK_CLI_MAJOR = 1
 
@@ -298,7 +302,7 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
         # is a configuration gap, not a user-authorization problem, so it must
         # be classified before the generic authorization bucket below.
         return LarkCLIError(
-            _redact_cli_error(_append_secret_hint(message), args),
+            _redact_cli_error(message, args),
             kind="config",
         )
     if str(code) in {"99991672", "99991679"} or any(
@@ -473,16 +477,19 @@ def probe_app_secret_resolution() -> dict[str, Any]:
                 "reason": "keychain_secret_not_migratable",
                 "remediation": (
                     "copy the App Secret from the Feishu Open Platform console "
-                    "(open.feishu.cn) for the bound App ID, then run "
-                    "`printf %s '<APP_SECRET>' | <skill> lark config init "
-                    "--app-id <APP_ID> --app-secret-stdin`"
+                    "(open.feishu.cn) for the bound App ID, then pipe it into "
+                    "manage feishu-app-secret (bash: printf %s '<APP_SECRET>' | "
+                    "manage feishu-app-secret; PowerShell: '<APP_SECRET>' | manage "
+                    "feishu-app-secret)"
                 ),
             }
         return {"resolvable": False, "reason": "api_error", "message": message[:200]}
     return {"resolvable": True}
 
 
-def _items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _items(payload: dict[str, Any] | list[Any]) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
     data = payload.get("data", payload)
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
@@ -502,6 +509,12 @@ def _items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     record_ids = data.get("record_id_list")
     field_names = data.get("fields")
     if isinstance(rows, list) and isinstance(record_ids, list):
+        if len(rows) > len(record_ids):
+            logger.warning(
+                "record payload truncated: %d rows but %d record ids",
+                len(rows),
+                len(record_ids),
+            )
         return [
             {
                 "record_id": record_ids[index],
@@ -672,6 +685,22 @@ def _https_wechat_url(value: Any) -> str:
     return upgrade_wechat_article_url(value)
 
 
+def _required_score(metadata: dict[str, Any]) -> float:
+    if "score" not in metadata:
+        raise ArticleNotSyncableError(
+            "this processed entry has no score/summary to build a Feishu record "
+            "(dismissed or legacy entry); restore and complete it properly first"
+        )
+    return float(metadata["score"])
+
+
+class ArticleNotSyncableError(ValueError):
+    """A processed entry lacks the data a Feishu record needs."""
+
+    code = "ARTICLE_NOT_SYNCABLE"
+    retryable = False
+
+
 def _logical_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
     tags = metadata.get("tags", [])
     if isinstance(tags, str):
@@ -684,7 +713,7 @@ def _logical_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[s
         "summary": str(metadata.get("summary") or article.get("digest", ""))[:500],
         "published_at": _datetime_value(article.get("update_time")),
         "fetched_at": _datetime_value(time.time()),
-        "score": float(metadata["score"]),
+        "score": _required_score(metadata),
         "rationale": str(metadata.get("rationale", ""))[:2000],
         "tags": [str(tag) for tag in tags],
         "read_status": "未读",

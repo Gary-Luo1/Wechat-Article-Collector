@@ -117,12 +117,18 @@ def next_stage(
         if authorization["state"] == "waiting":
             return "feishu_authorization_waiting", "resume_existing_user_base_authorization"
         return "feishu_authorization_required", "run_feishu_auth_start"
-    if (
-        config["feishu"]["identity"] == "bot"
-        and policy["allow_feishu_provisioning"]
-        and not config["feishu"]["manager_open_id"]
-    ):
+    if config["feishu"]["identity"] == "bot" and not config["feishu"]["manager_open_id"]:
+        # Checked for every bot destination, not only approved provisioning:
+        # creation fails without a manager, so asking earlier prevents a
+        # next_stage loop that suggests commands which cannot succeed.
         return "feishu_manager_missing", "resolve_and_save_feishu_manager"
+    if (
+        config["feishu"].get("provisioning") == "created"
+        and not config["feishu"]["enabled"]
+    ):
+        # A creation attempt wrote its recovery anchor (token+names) but did
+        # not finish grant/preflight; only a same-name rerun can resume it.
+        return "feishu_provision_incomplete", "rerun_feishu_create_base_to_resume"
     if not (config["feishu"]["base_token"] and config["feishu"]["table_id"]):
         if destination == "create":
             return "feishu_target_pending", "provision_configured_feishu_base"

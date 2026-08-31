@@ -58,7 +58,9 @@ Configuration is pure dialogue: loop on `manage next` — it returns the current
 ### Automatic execution phase
 
 6. After policy confirmation, follow `manage status` and perform every covered setup and routine step without asking again. If Feishu provisioning is approved, run `manage feishu-create-base --name <APPROVED_BASE> --table-name <APPROVED_TABLE>` without `--yes`; an exact policy match authorizes it. The command generates the standard schema internally through a native Unicode argv array, grants the configured human manager full access to a Bot-created Base, verifies fields, saves mappings, records health, and consumes the one-shot provisioning approval so retries cannot create duplicates. A name mismatch only previews and requires new authorization. For an existing target, resolve and save real IDs, require compatible title/URL fields, and do not mutate its schema.
-7. Discover and inspect articles:
+7. Daily routine: run `manage daily` for the confirmed preview (subscriptions, window, thresholds, Feishu target, estimated billed calls) and, after user confirmation, `--yes` executes discovery and returns digest candidates. `discover --hours N [--force]` remains the manual variant (`--force` re-runs subscriptions inside their cooldown and is billed again).
+
+8. Discover and inspect articles:
 
    ```text
    bash scripts/run.sh discover

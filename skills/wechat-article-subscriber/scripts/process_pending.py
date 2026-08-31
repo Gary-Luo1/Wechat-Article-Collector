@@ -59,6 +59,7 @@ class ArticleFetchPaidError(ValueError):
         super().__init__(f"redfox content fetch failed: {source}")
         self.code = getattr(source, "code", "REDFOX_API_ERROR")
         self.retryable = bool(getattr(source, "retryable", False))
+        self.details = getattr(source, "details", None)
 
 
 class ArticleReadRequiredError(ValueError):
@@ -80,6 +81,12 @@ def _resolve(arguments: argparse.Namespace) -> dict[str, Any]:
         if arguments.link:
             processed = read_queue()["processed"].get(normalize_url(arguments.link))
             if processed:
+                disposition = (processed.get("metadata") or {}).get("disposition")
+                if disposition in {"dismissed", "legacy_unreadable"}:
+                    raise LookupError(
+                        f"article is already processed ({disposition}); restore it "
+                        "first if you want it back in the workflow"
+                    ) from None
                 raise LookupError(
                     "article is already processed (sync_status="
                     f"{processed.get('sync_status')}); use sync-feishu --link to "
@@ -442,7 +449,7 @@ def cmd_done(arguments: argparse.Namespace) -> int:
     if status == "pending":
         try:
             _sync_entry(entry, dry_run=arguments.dry_run)
-        except (ConfigError, LarkCLIError, ValueError) as exc:
+        except (ConfigError, KeyError, LarkCLIError, ValueError) as exc:
             if not arguments.dry_run:
                 update_sync_status(article["link"], "pending", str(exc))
             _raise_sync_failures(
@@ -471,6 +478,12 @@ def cmd_sync_all(*, dry_run: bool = False, link: str | None = None) -> int:
         entry = data["processed"].get(normalize_url(link))
         if not entry:
             raise LookupError("no processed article matches that URL")
+        disposition = (entry.get("metadata") or {}).get("disposition")
+        if disposition in {"dismissed", "legacy_unreadable"}:
+            raise ValueError(
+                f"this entry is {disposition} and has no score/summary to sync; "
+                "restore it and complete it properly first"
+            )
         if not dry_run and entry.get("sync_status") != "pending":
             update_sync_status(link, "pending")
         entries = [
@@ -486,7 +499,7 @@ def cmd_sync_all(*, dry_run: bool = False, link: str | None = None) -> int:
         try:
             _sync_entry(entry, dry_run=dry_run)
             print(f"Synced: {entry['article'].get('title', '')}")
-        except (ConfigError, LarkCLIError, ValueError) as exc:
+        except (ConfigError, KeyError, LarkCLIError, ValueError) as exc:
             failures.append(exc)
             if not dry_run:
                 update_sync_status(entry["article"]["link"], "pending", str(exc))

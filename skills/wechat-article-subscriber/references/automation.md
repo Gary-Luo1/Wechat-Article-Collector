@@ -30,12 +30,12 @@ Before scheduling, run:
 bash scripts/run.sh manage doctor --online
 ```
 
-Require `runtime.supported`, installed dependencies, valid WeChat health, resolved subscriptions, and—if enabled—successful Feishu preflight. Store no credentials in the scheduler command or environment; the command reads the restricted application-state config.
+Require `runtime.supported`, installed dependencies, a valid redfox key and healthy subscriptions, resolved subscriptions, and—if enabled—successful Feishu preflight. Store no credentials in the scheduler command or environment; the command reads the restricted application-state config.
 
 ## Result handling
 
 - Exit `0` and `ok:true`: record the queue counts; no user notification is needed unless requested.
-- WeChat credential/context errors: stop repeated attempts and ask the user to re-enter the redfox API key via stdin.
+- redfox credential errors: stop repeated attempts and ask the user to re-enter the redfox API key via stdin.
 - Rate limit/transient errors: use bounded exponential backoff with jitter; do not run more frequently than the configured interval.
 - After three consecutive failures recorded in health, suspend the schedule and surface the redacted `doctor` report.
 - Never retry authorization, permission, wrong-app, confirmation-required, or field-mapping failures in a loop.

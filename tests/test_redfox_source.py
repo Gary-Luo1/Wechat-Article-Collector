@@ -690,3 +690,85 @@ def test_needs_refresh_token_is_accepted(monkeypatch):
     }
     result = bitable_client.verify_feishu_identity(cfg, identity="user")
     assert result["status"] == "ready"
+
+
+def test_dismissed_entry_cannot_pollute_sync_set(isolated_home):
+    from queue_helpers import add_pending, dismiss_article, read_queue
+    import process_pending
+
+    add_pending(
+        [{"title": "d", "link": "https://mp.weixin.qq.com/s?__biz=1&mid=1&idx=1&sn=dm1",
+          "account": "a"}]
+    )
+    link = "https://mp.weixin.qq.com/s?__biz=1&mid=1&idx=1&sn=dm1"
+    dismiss_article(link)
+    with pytest.raises(ValueError, match="dismissed"):
+        process_pending.cmd_sync_all(link=link)
+    # The dismissed entry must NOT have been flipped to pending.
+    entry = read_queue()["processed"][process_pending.normalize_url(link)]
+    assert entry["sync_status"] == "not_requested"
+
+
+def test_set_alias_rejects_duplicate_identity(isolated_home):
+    from config_store import save_config
+    import manage
+
+    cfg = _config()
+    cfg["subscriptions"] = [
+        {"name": "甲", "alias": "jia"},
+        {"name": "乙", "alias": "yi"},
+    ]
+    save_config(cfg)
+    with pytest.raises(ValueError, match="already used"):
+        manage._subscriptions(
+            types_simple_namespace(
+                subscription_command="set-alias", name="甲", alias="yi", biz=""
+            )
+        )
+
+
+def test_feishu_setup_existing_without_target_asks_for_url(isolated_home):
+    from config_store import save_config
+    import manage
+
+    cfg = _config()
+    cfg["feishu"].update(
+        {
+            "identity": "user",
+            "expected_app_id": "cli_x",
+            "cli_profile": "p1",
+            "destination": "existing",
+            "enabled": False,
+        }
+    )
+    cfg["setup"]["feishu_identity_confirmed"] = True
+    cfg["setup"]["feishu_authorization"]["state"] = "authorized"
+    cfg["setup"]["feishu_authorization"]["identity"] = "user"
+    save_config(cfg)
+    state, action = manage._feishu_setup()
+    assert action == "configure_existing_feishu_target"
+    assert "feishu-target --url" in state["next_command"]
+
+
+def test_half_provisioned_base_requests_same_name_rerun(isolated_home):
+    from config_store import save_config
+    import execution_policy as ep
+
+    cfg = _config()
+    cfg["feishu"].update(
+        {
+            "identity": "bot",
+            "manager_open_id": "ou_m",
+            "destination": "create",
+            "provisioning": "created",
+            "enabled": False,
+            "base_token": "BTOK",
+            "table_id": "tblX",
+        }
+    )
+    cfg["setup"]["feishu_identity_confirmed"] = True
+    cfg["setup"]["search_window_confirmed"] = True
+    save_config(cfg)
+    stage, action = ep.next_stage(cfg, cli={"compatible": True})
+    assert stage == "feishu_provision_incomplete"
+    assert action == "rerun_feishu_create_base_to_resume"

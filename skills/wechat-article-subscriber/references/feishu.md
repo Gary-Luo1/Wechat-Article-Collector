@@ -29,8 +29,9 @@ or `--as bot`.
 
 Two target modes are confirmed with the user before anything is written:
 - **Existing table** — the user pastes the table URL; `manage feishu-target --url <link>`
-  parses the base/table tokens, verifies read access and the real fields (read-only),
-  and saves the mapping. Nothing is created.
+  parses the base/table tokens and verifies read access and the real fields
+  (read-only) before saving the target; the field mapping itself is saved by
+  `process feishu-check --save-mapping`. Nothing is created.
 - **New standard table** — the wizard shows the exact 11-field list and only creates
   after the user confirms names and fields (one execution-policy approval).
 

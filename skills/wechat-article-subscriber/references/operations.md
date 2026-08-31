@@ -190,6 +190,6 @@ Machine-readable commands return one JSON object:
 {"ok":true,"data":{},"next_action":"none"}
 ```
 
-Failures use `error.code`, a redacted `message`, `retryable`, and `next_action`. Agents should branch on the code, not parse human prose. Article reads distinguish `ARTICLE_RISK_CONTROL`, `ARTICLE_TRANSIENT`, `ARTICLE_HTTP_ERROR`, `ARTICLE_CONTENT_INVALID`, `ARTICLE_RESPONSE_TOO_LARGE`, and `ARTICLE_READ_REQUIRED`; only `ARTICLE_TRANSIENT` is retryable. A failed discovery response can include safe `meta` counts for preserved partial progress. `process` accepts global formatting before the subcommand: `process --format json list`.
+Failures use `error.code`, a redacted `message`, `retryable`, and `next_action`. Agents should branch on the code, not parse human prose. Current code families: `REDFOX_AUTH` (re-enter the key), `REDFOX_RATE_LIMITED`/`REDFOX_TRANSIENT` (the only retryable ones), `REDFOX_API_ERROR` (upstream code in details), `ARTICLE_READ_REQUIRED`, `ARTICLE_NOT_FOUND`, `ARTICLE_NOT_SYNCABLE` (dismissed/legacy entries have nothing to sync), `LARK_*` (Feishu CLI classification), `CONFIG_ERROR`, and `INVALID_ARGUMENT`. A failed discovery response can include safe `meta` counts for preserved partial progress. `process` accepts global formatting before the subcommand: `process --format json list`.
 
 Configuration format changes are versioned. The first migration preserves a restricted `config.vN.backup.json`; `manage reset --scope all-data --yes` removes these backups too.
