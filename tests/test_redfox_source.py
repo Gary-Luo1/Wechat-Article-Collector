@@ -8,6 +8,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import io
 import pytest
 from types import SimpleNamespace
 
@@ -569,3 +570,13 @@ def test_redfox_set_key_seeds_missing_config(isolated_home, monkeypatch):
     data, _ = manage._redfox_set_key()
     assert data["configured"] is True
     assert load_config()["redfox"]["api_key"] == "fresh-key-12345678"
+
+
+def test_first_contact_commands_seed_missing_config(isolated_home, monkeypatch):
+    import manage
+    from config_store import config_path
+
+    assert not config_path().exists()
+    monkeypatch.setattr("sys.stdin", io.StringIO("k-12345678"))
+    manage.main(["--format", "text", "subscriptions", "add", "--name", "机器之心", "--alias", "a1"])
+    assert config_path().exists()

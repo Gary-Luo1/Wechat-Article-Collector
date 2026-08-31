@@ -1743,14 +1743,37 @@ def _probe_redfox(api_key: str) -> dict[str, Any]:
         client.close()
 
 
+# First-contact commands a fresh user may run before any configuration
+# exists. They seed the default configuration instead of failing with
+# "configuration not found"; read-only diagnostics (status/doctor/config-show)
+# and reset intentionally stay out so they keep reporting the true state.
+SEED_CONFIG_COMMANDS = frozenset(
+    {
+        "redfox-set-key",
+        "subscriptions",
+        "preferences",
+        "execution-policy",
+        "feishu-identity",
+        "feishu-destination",
+        "feishu-app",
+        "feishu-app-secret",
+        "feishu-local-profile",
+        "feishu-host-context",
+        "feishu-manager",
+    }
+)
+
+
+def _seed_config_if_missing() -> None:
+    if not config_path().exists():
+        save_config(validate_config(dict(DEFAULT_CONFIG)))
+
+
 def _redfox_set_key() -> tuple[dict[str, Any], str]:
     api_key = _read_secret_stdin("the redfox API key")
     if not api_key:
         raise ValueError("the redfox API key is empty")
-    if not config_path().exists():
-        # The key is the very first credential a fresh user provides; seeding
-        # the default configuration here must not require any prior setup.
-        save_config(validate_config(dict(DEFAULT_CONFIG)))
+    _seed_config_if_missing()
 
     def mutate_key(config: dict[str, Any]) -> dict[str, Any]:
         config["redfox"]["api_key"] = api_key
@@ -2008,6 +2031,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
+        if arguments.command in SEED_CONFIG_COMMANDS:
+            _seed_config_if_missing()
         next_action = "none"
         if arguments.command == "doctor":
             data, next_action = _doctor(online=arguments.online)
