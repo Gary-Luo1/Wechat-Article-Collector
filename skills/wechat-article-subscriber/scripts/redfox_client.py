@@ -27,6 +27,10 @@ QUERY_WORK_LIST_URL = f"{API_BASE}/story/api/gzh/data/queryWorkList"
 # Detail endpoint: full plain-text content for one work. Verified live:
 # code 2000 = success, 3203 = "no data / bad param" (no credit charged).
 QUERY_WORK_URL = f"{API_BASE}/story/api/gzh/data/workDetail"
+# Account search: maps a display name to candidates with their WeChat aliases.
+# One paid call per invocation; first page (20 results) is enough for
+# exact-name matching.
+SEARCH_USER_URL = f"{API_BASE}/story/api/gzh/data/searchUser"
 
 # Both codes above verified live: 2000 = success, 3203 = "no data / bad
 # param" with no credit charged — non-errors for callers.
@@ -261,6 +265,28 @@ class RedfoxClient:
         if not isinstance(items, list):
             items = []
         return items, int(data.get("code", 0) or 0)
+
+    def search_accounts(self, keyword: str) -> list[dict[str, str]]:
+        """Search accounts by keyword; returns [{account, account_name}]."""
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            raise ValueError("keyword is required")
+        data = self._post(
+            SEARCH_USER_URL, {"keyword": keyword, "offset": 0}, operation="account_search"
+        )
+        items = data.get("data")
+        if isinstance(items, dict):
+            items = items.get("list")
+        if not isinstance(items, list):
+            return []
+        return [
+            {
+                "account": sanitize_text(item.get("account"), 64),
+                "account_name": sanitize_text(item.get("accountName"), 128),
+            }
+            for item in items
+            if isinstance(item, dict) and item.get("account")
+        ]
 
     def query_work(self, work_uuid: str) -> tuple[dict[str, Any], int]:
         """Return (raw detail, raw API code) for one work.

@@ -77,6 +77,7 @@ ACTION_LABELS = {
     "edit_local_config_file": "填写并保存本地配置文件",
     "run_online_doctor": "在线体检 redfox API 与飞书",
     "run_redfox_key_setup": "通过 stdin 设置 redfox API Key",
+    "confirm_daily_run": "确认以上计划后加 --yes 执行每日发现与简报",
     "ask_user_for_search_window": "选择文章搜索时间范围",
     "ask_for_subscription_names": "添加至少一个公众号",
     "edit_subscriptions_add_alias": "为缺少微信号的订阅补充 alias（广域库仅认微信号）",
@@ -88,6 +89,7 @@ ACTION_LABELS = {
     "run_feishu_auth_start": "检查现有飞书授权；仅在缺失时发起一次授权",
     "resume_existing_user_base_authorization": "继续当前飞书授权，不要重新发起",
     "check_or_install_lark_cli": "检查或安装兼容的飞书 CLI",
+    "ask_user_for_feishu_setup_choice": "本地未发现 lark-cli 或应用配置：询问用户如何继续（安装 / 提供应用信息 / 跳过飞书），不扩大检索范围",
     "install_compatible_lark_cli": "安装兼容的飞书 CLI 版本",
     "authorize_and_run_feishu_check": "完成飞书只读检查",
     "resolve_and_save_feishu_manager": "确认接收机器人文件管理权限的飞书用户",
@@ -1281,6 +1283,102 @@ def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     }, "finish_existing_user_base_authorization"
 
 
+def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+    """Preview the full daily plan for confirmation, then run it with --yes."""
+    from article_inbox import plan_digest
+    from discover_only import discover_articles
+
+    config = load_config()
+    subscriptions = [
+        {
+            "name": str(item.get("name", "")).strip(),
+            "alias": str(item.get("alias", "")).strip(),
+            "cooldown_active": bool(item.get("last_discovered_at")),
+        }
+        for item in config["subscriptions"]
+    ]
+    feishu = config["feishu"]
+    plan: dict[str, Any] = {
+        "subscriptions": subscriptions,
+        "window_hours": config["settings"]["check_hours"],
+        "min_score": config["settings"]["min_score"],
+        "digest": {
+            "hours": config["preferences"]["digest_hours"],
+            "limit": config["preferences"]["digest_limit"],
+            "include_topics": config["preferences"]["include_topics"],
+            "exclude_keywords": config["preferences"]["exclude_keywords"],
+        },
+        "feishu": {
+            "enabled": feishu["enabled"],
+            "destination": feishu["destination"],
+            "target_configured": bool(feishu["base_token"] and feishu["table_id"]),
+            "sync_allowed_by_policy": bool(
+                config["setup"]["execution_policy"]["allow_feishu_sync"]
+            ),
+            "mapped_fields": sorted(feishu["field_mapping"]),
+        },
+        "estimated_billed_calls": sum(
+            1 for item in subscriptions if not item["cooldown_active"]
+        ),
+        "note": "1 list call per subscription outside its cooldown, plus 1 detail call per article read",
+    }
+    if not arguments.yes:
+        return plan, "confirm_daily_run"
+
+    diagnostics: list[dict] = []
+    queued = 0
+
+    def persist(articles: list[dict]) -> int:
+        nonlocal queued
+        from queue_helpers import add_pending
+
+        added = add_pending(
+            articles, content_dedup=bool(config["settings"]["content_dedup"])
+        )
+        queued += added
+        return added
+
+    discovered = discover_articles(
+        config, float(config["settings"]["check_hours"]), None, diagnostics, persist
+    )
+    preferences = config["preferences"]
+    digest = plan_digest(preferences, hours=preferences["digest_hours"], limit=preferences["digest_limit"])
+    plan["run"] = {
+        "discovered": len(discovered),
+        "queued": queued,
+        "accounts": diagnostics,
+        "digest_candidates": digest["candidates"],
+    }
+    return plan, "read_score_digest_candidates"
+
+
+def _resolve_alias_by_name(name: str) -> str:
+    """Resolve one display name to its WeChat alias via one paid search call."""
+    from redfox_client import RedfoxClient
+
+    api_key = load_config()["redfox"]["api_key"].strip()
+    if not api_key:
+        raise ConfigError("redfox API key is missing; run the redfox key setup command")
+    client = RedfoxClient(api_key)
+    try:
+        candidates = client.search_accounts(name)
+    finally:
+        client.close()
+    exact = [c for c in candidates if c["account_name"] == name]
+    if len(exact) == 1:
+        return exact[0]["account"]
+    if not exact:
+        raise ValueError(
+            f"no account named {name!r} in the redfox library; check the name or "
+            "supply the WeChat alias directly with --alias (free)"
+        )
+    listing = ", ".join(f"{c['account_name']}/{c['account']}" for c in exact)
+    raise ValueError(
+        f"multiple accounts named {name!r}: {listing}; pick one and rerun with "
+        "--alias <WECHAT_ALIAS>"
+    )
+
+
 def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
     config = load_config()
     items = config["subscriptions"]
@@ -1301,12 +1399,16 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
             if value and value.strip()
         }
         if not candidate:
-            raise ValueError("provide --name, --alias, or --biz")
+            raise ValueError("provide --name and/or --alias (--biz alone is not queryable)")
         if not candidate.get("alias"):
-            raise ValueError(
-                "--alias is required: the redfox wide library identifies "
-                "accounts by WeChat alias only"
-            )
+            # Two supported input modes, cheapest first:
+            # 1. the user supplies the WeChat alias directly (free, exact);
+            # 2. only a display name was given -> one paid search-call to
+            #    resolve it. Ambiguous names are reported, never guessed.
+            if not candidate.get("name"):
+                raise ValueError("--biz alone cannot be discovered; provide --name or --alias")
+            resolved = _resolve_alias_by_name(candidate["name"])
+            candidate["alias"] = resolved
         identity = {str(candidate.get(key, "")).casefold() for key in ("name", "alias", "biz") if candidate.get(key)}
         state: dict[str, Any] = {}
 
@@ -1654,6 +1756,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="include live checks; the redfox probe makes 1 billed API call",
     )
     commands.add_parser("status")
+    daily = commands.add_parser("daily")
+    daily.add_argument(
+        "--yes",
+        action="store_true",
+        help="run the confirmed plan: discover, then produce the digest candidates",
+    )
     # The redfox key is always read from piped stdin; there is no flag so no
     # caller can believe it may pass the secret as an argument.
     commands.add_parser(
@@ -1746,8 +1854,12 @@ def build_parser() -> argparse.ArgumentParser:
     list_subscriptions.add_argument("--query", default="")
     add = subcommands.add_parser("add")
     add.add_argument("--name", default="")
-    add.add_argument("--alias", default="")
-    add.add_argument("--biz", default="")
+    add.add_argument(
+        "--alias",
+        default="",
+        help="WeChat alias (微信号): free and exact; preferred. Phone WeChat shows it on the account profile page.",
+    )
+    add.add_argument("--biz", default="", help="kept for identity matching only; not queryable")
     bulk_add = subcommands.add_parser("bulk-add")
     bulk_add.add_argument("--name", action="append", default=[])
     bulk_add.add_argument("--file", type=Path)
@@ -1783,6 +1895,8 @@ def main(argv: list[str] | None = None) -> int:
             data, next_action = _doctor(online=arguments.online)
         elif arguments.command == "status":
             data, next_action = _status()
+        elif arguments.command == "daily":
+            data, next_action = _daily(arguments)
         elif arguments.command == "redfox-set-key":
             data, next_action = _redfox_set_key()
         elif arguments.command == "redfox-status":

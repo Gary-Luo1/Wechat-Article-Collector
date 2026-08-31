@@ -25,6 +25,10 @@ manage feishu-identity --as bot
 All later Base commands must use the confirmed identity with explicit `--as user`
 or `--as bot`.
 
+## Search scope
+
+Discovery of existing configuration is limited to the Skill's isolated runtime and the user's own global lark-cli profile list (`manage feishu-local-profile scan`). When nothing is found there, never broaden the search to other accounts, machines, or guessed credentials — stop and ask the user whether to install lark-cli, supply App credentials, or skip Feishu.
+
 ## Importing an existing local lark-cli profile (macOS keychain limitation)
 
 `manage feishu-local-profile scan` lists every global lark-cli profile and requires an

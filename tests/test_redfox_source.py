@@ -9,6 +9,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace
+
+
+def types_simple_namespace(**kw):
+    return SimpleNamespace(**kw)
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "wechat-article-subscriber" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -441,3 +446,73 @@ def test_uncrawled_article_gets_specific_guidance(isolated_home, monkeypatch):
     monkeypatch.setattr("redfox_client.RedfoxClient", lambda *a, **k: _Uncrawled())
     with pytest.raises(ValueError, match="not crawled"):
         process_pending._print_article(get_pending()[0])
+
+
+def test_add_resolves_name_to_alias_via_search(isolated_home, monkeypatch):
+    import manage
+    from config_store import save_config
+
+    save_config(_config())
+
+    class _Search:
+        def search_accounts(self, keyword):
+            return [
+                {"account": "QbitAI", "account_name": "量子位"},
+                {"account": "fake1", "account_name": "量子位智库"},
+            ]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("redfox_client.RedfoxClient", lambda *a, **k: _Search())
+    data = manage._subscriptions(
+        types_simple_namespace(subscription_command="add", name="量子位", alias="", biz="")
+    )
+    assert data["added"]["alias"] == "QbitAI"
+
+
+def test_add_ambiguous_name_lists_candidates(isolated_home, monkeypatch):
+    import manage
+    from config_store import save_config
+
+    save_config(_config())
+
+    class _Ambiguous:
+        def search_accounts(self, keyword):
+            return [
+                {"account": "a1", "account_name": "同名号"},
+                {"account": "a2", "account_name": "同名号"},
+            ]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("redfox_client.RedfoxClient", lambda *a, **k: _Ambiguous())
+    with pytest.raises(ValueError, match="--alias"):
+        manage._subscriptions(
+            types_simple_namespace(subscription_command="add", name="同名号", alias="", biz="")
+        )
+
+
+def test_daily_preview_then_confirmed_run(isolated_home, monkeypatch):
+    import manage
+    from config_store import save_config
+
+    save_config(_config())
+
+    class _Daily:
+        def list_articles(self, **kwargs):
+            return [], {"pages": 1, "empty_reason": "exhausted", "api_code": 2000}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("discover_only.RedfoxClient", lambda *a, **k: _Daily())
+    preview = manage._daily(types_simple_namespace(yes=False))
+    assert preview[1] == "confirm_daily_run"
+    assert preview[0]["estimated_billed_calls"] == 1
+    assert preview[0]["subscriptions"][0]["alias"] == "rmrb"
+
+    result = manage._daily(types_simple_namespace(yes=True))
+    assert result[1] == "read_score_digest_candidates"
+    assert result[0]["run"]["discovered"] == 0

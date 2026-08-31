@@ -106,7 +106,10 @@ def next_stage(
     if not config["setup"]["feishu_identity_confirmed"]:
         return "feishu_identity_unconfirmed", "ask_feishu_identity_before_authorization"
     if cli is None:
-        return "feishu_cli_missing_or_unchecked", "check_or_install_lark_cli"
+        # Do not silently broaden the search beyond the Skill's isolated
+        # runtime and the user's own local lark-cli profiles: when nothing is
+        # found locally, the user decides how to proceed.
+        return "feishu_cli_missing_or_unchecked", "ask_user_for_feishu_setup_choice"
     if not cli.get("compatible"):
         return "feishu_cli_incompatible", "install_compatible_lark_cli"
     authorization = config["setup"]["feishu_authorization"]
