@@ -757,6 +757,116 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
     }
 
 
+def _feishu_setup() -> tuple[dict[str, Any], str]:
+    """Dialogue-ready Feishu onboarding state: what to ask, what to run next.
+
+    A fresh user needs no app information prepared: this command reports the
+    current stage, the question to put to the user, and the exact next
+    command, including console guidance for creating a new app.
+    """
+    config = load_config()
+    feishu = config["feishu"]
+    app_id = _expected_app_id(config)
+    state: dict[str, Any] = {
+        "identity_confirmed": bool(config["setup"]["feishu_identity_confirmed"]),
+        "identity": feishu["identity"],
+        "app_bound": bool(app_id),
+        "app_id": app_id,
+        "profile": feishu["cli_profile"],
+        "authorization": _authorization(config)["state"],
+        "destination": feishu["destination"],
+        "target_configured": bool(feishu["base_token"] and feishu["table_id"]),
+    }
+    guide = {
+        "create_app_url": "https://open.feishu.cn/app?lang=zh-CN",
+        "create_app_steps": [
+            "在飞书开放平台创建一个企业自建应用（名字随意，例如 文章订阅同步）。",
+            "在应用后台 权限管理 开通多维表格权限（base:app、base:table、base:record、base:field 的读写）。",
+            "发布应用版本，然后从 凭证与基础信息 复制 App ID 和 App Secret。",
+        ],
+    }
+    if not state["identity_confirmed"]:
+        state.update(
+            next_question="飞书用哪种身份写入：个人用户（扫码授权一次）还是机器人应用？",
+            next_command="manage feishu-identity --as user|bot",
+        )
+        return state, "ask_feishu_identity_before_authorization"
+    if not state["app_bound"]:
+        state.update(
+            next_question="请提供飞书应用的 App ID（或按引导去开放平台创建一个新应用）。",
+            next_command="manage feishu-app --app-id <APP_ID>",
+            create_app_guide=guide,
+        )
+        return state, "select_feishu_app"
+    if not state["profile"]:
+        state.update(
+            next_question="确认将该应用导入技能的私有配置？",
+            next_command="manage feishu-local-profile import --yes",
+        )
+        return state, "reuse_or_configure_private_lark_profile"
+    if state["authorization"] != "authorized":
+        state.update(
+            next_question="应用已绑定但密钥/授权未就绪：请提供 App Secret（stdin），随后完成一次扫码授权。",
+            next_command=(
+                f"printf %s '<APP_SECRET>' | manage feishu-app-secret --app-id {app_id}"
+            ),
+            then="manage feishu-auth start（扫码后 feishu-auth complete）",
+            create_app_guide=guide,
+        )
+        return state, "provide_app_secret_for_private_profile"
+    if state["destination"] == "undecided":
+        state.update(
+            next_question="文章写入飞书的哪里：跳过、映射现有表格、还是创建新 Base？",
+            next_command="manage feishu-destination --mode skip|existing|create",
+        )
+        return state, "ask_user_for_feishu_destination"
+    if not state["target_configured"] and state["destination"] == "create":
+        state.update(
+            next_question="确认创建标准文章表？",
+            next_command="manage feishu-create-base --name 公众号文章 --table-name 文章列表",
+        )
+        return state, "provision_configured_feishu_base"
+    state.update(
+        next_question=None,
+        next_command="manage doctor --online（最终校验）",
+    )
+    return state, "run_feishu_validation"
+
+
+def _feishu_app_secret(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+    """Pipe one App Secret from stdin into the isolated lark-cli profile."""
+    from bitable_client import _run_lark, probe_app_secret_resolution
+
+    config = load_config()
+    app_id = _expected_app_id(config)
+    if not app_id:
+        raise ConfigError("bind the App ID first with manage feishu-app")
+    if arguments.app_id and arguments.app_id.strip() != app_id:
+        raise ValueError(
+            f"--app-id {arguments.app_id} does not match the confirmed App ID {app_id}"
+        )
+    if not config["setup"]["feishu_identity_confirmed"]:
+        raise ConfigError("confirm Feishu identity before entering an App Secret")
+    secret = _read_secret_stdin("the Feishu App Secret")
+    if not secret:
+        raise ValueError("the App Secret is empty")
+    _run_lark(
+        ["config", "init", "--app-id", app_id, "--app-secret-stdin"],
+        retries=1,
+        input_text=secret,
+    )
+    probe = probe_app_secret_resolution()
+    return {
+        "app_id": app_id,
+        "secret_accepted": probe["resolvable"],
+        "probe": probe,
+    }, (
+        "run_feishu_context_then_authorize_only_if_needed"
+        if probe["resolvable"]
+        else "provide_app_secret_for_private_profile"
+    )
+
+
 def _feishu_local_profile(
     arguments: argparse.Namespace,
 ) -> tuple[dict[str, Any], str]:
@@ -1756,6 +1866,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="include live checks; the redfox probe makes 1 billed API call",
     )
     commands.add_parser("status")
+    commands.add_parser("feishu-setup")
+    app_secret = commands.add_parser("feishu-app-secret")
+    app_secret.add_argument("--app-id", default="", help="optional; must match the confirmed App ID")
     daily = commands.add_parser("daily")
     daily.add_argument(
         "--yes",
@@ -1895,6 +2008,10 @@ def main(argv: list[str] | None = None) -> int:
             data, next_action = _doctor(online=arguments.online)
         elif arguments.command == "status":
             data, next_action = _status()
+        elif arguments.command == "feishu-setup":
+            data, next_action = _feishu_setup()
+        elif arguments.command == "feishu-app-secret":
+            data, next_action = _feishu_app_secret(arguments)
         elif arguments.command == "daily":
             data, next_action = _daily(arguments)
         elif arguments.command == "redfox-set-key":

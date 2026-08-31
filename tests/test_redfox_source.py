@@ -516,3 +516,44 @@ def test_daily_preview_then_confirmed_run(isolated_home, monkeypatch):
     result = manage._daily(types_simple_namespace(yes=True))
     assert result[1] == "read_score_digest_candidates"
     assert result[0]["run"]["discovered"] == 0
+
+
+def test_feishu_setup_guides_fresh_user_step_by_step(isolated_home):
+    import manage
+    from config_store import save_config
+
+    base = _config()
+    base["feishu"] = {"destination": "undecided", "enabled": False}
+    base["setup"] = dict(base["setup"])
+    base["setup"]["feishu_identity_confirmed"] = False
+    save_config(base)
+
+    state, action = manage._feishu_setup()
+    assert action == "ask_feishu_identity_before_authorization"
+    assert state["next_command"].startswith("manage feishu-identity")
+
+    base["setup"]["feishu_identity_confirmed"] = True
+    save_config(base)
+    state, action = manage._feishu_setup()
+    assert action == "select_feishu_app"
+    assert "create_app_guide" in state  # console guidance for a brand-new app
+
+
+def test_feishu_app_secret_requires_bound_matching_app(isolated_home, monkeypatch):
+    import manage
+    from config_store import save_config
+
+    cfg = _config()
+    cfg["feishu"]["expected_app_id"] = "cli_confirmed123"
+    cfg["setup"]["feishu_identity_confirmed"] = True
+    save_config(cfg)
+
+    with pytest.raises(ValueError, match="does not match"):
+        manage._feishu_app_secret(types_simple_namespace(app_id="cli_other"))
+    # Empty stdin -> the secret is refused before anything is sent to lark-cli.
+    import io
+
+    monkeypatched_stdin = io.StringIO("")
+    monkeypatch.setattr("sys.stdin", monkeypatched_stdin)
+    with pytest.raises(ValueError, match="App Secret is empty"):
+        manage._feishu_app_secret(types_simple_namespace(app_id=""))

@@ -358,8 +358,10 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
 
 
 def _run_lark(
-    args: list[str], *, retries: int = 3
+    args: list[str], *, retries: int = 3, input_text: str | None = None
 ) -> dict[str, Any] | list[Any]:
+    # input_text is forwarded to the child's stdin; used exclusively for
+    # secrets, which must never reach argv, logs, or error text.
     try:
         safe_args = safe_lark_arguments(args)
     except ValueError as exc:
@@ -375,6 +377,7 @@ def _run_lark(
         try:
             result = subprocess.run(
                 command,
+                input=input_text,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

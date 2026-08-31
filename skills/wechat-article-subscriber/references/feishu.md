@@ -25,6 +25,16 @@ manage feishu-identity --as bot
 All later Base commands must use the confirmed identity with explicit `--as user`
 or `--as bot`.
 
+## Guided onboarding (feishu-setup)
+
+`manage feishu-setup` is the single entry point for Feishu configuration. It never
+assumes prepared app information: for the current state it returns the question to
+ask the user, the exact next command, and — when no app exists yet — console
+guidance for creating one (open.feishu.cn, enterprise custom app, Base
+read/write scopes). The App Secret enters only through
+`printf %s '<APP_SECRET>' | manage feishu-app-secret`, which pipes it into the
+isolated profile and immediately probes that it works.
+
 ## Search scope
 
 Discovery of existing configuration is limited to the Skill's isolated runtime and the user's own global lark-cli profile list (`manage feishu-local-profile scan`). When nothing is found there, never broaden the search to other accounts, machines, or guessed credentials — stop and ask the user whether to install lark-cli, supply App credentials, or skip Feishu.
