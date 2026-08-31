@@ -101,17 +101,6 @@ FIELD_SPECS: dict[str, dict[str, Any]] = {
     },
 }
 
-# Kept as a public compatibility constant. It describes the standard schema;
-# it is never used to mutate an existing user table automatically.
-REQUIRED_FIELDS = {
-    spec["name"]: {
-        key: value
-        for key, value in spec.items()
-        if key not in {"name", "aliases", "required", "accepted_types"}
-    }
-    for spec in FIELD_SPECS.values()
-}
-
 READ_ONLY_TYPES = {
     "auto_number",
     "lookup",
@@ -155,7 +144,7 @@ class LarkCLIError(RuntimeError):
 
 
 TESTED_LARK_CLI_VERSION = "1.0.69"
-MIN_LARK_CLI_VERSION = (1, 0, 69)
+MIN_LARK_CLI_VERSION = (1, 0, 69)  # tested through 1.0.92 on 2026-08-30
 MAX_LARK_CLI_MAJOR = 1
 
 
@@ -258,7 +247,9 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
         code = error.get("code")
         error_type = str(error.get("type", ""))
         subtype = str(error.get("subtype", ""))
-        message = str(error.get("message") or error.get("msg") or "lark-cli request failed")
+        message = _append_secret_hint(
+            str(error.get("message") or error.get("msg") or "lark-cli request failed")
+        )
         hint = str(error.get("hint") or "").strip()
         console_url = str(error.get("console_url") or "").strip()
         permission_violations = error.get("permission_violations")
@@ -294,6 +285,15 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
             "share/role permission; do not retry or silently switch to bot.",
             kind="permission",
             code=code,
+        )
+    if "client_secret" in lower or "config init --new" in lower:
+        # A device-authorization request missing client_secret means the
+        # isolated profile cannot decrypt the keychain-stored App Secret; this
+        # is a configuration gap, not a user-authorization problem, so it must
+        # be classified before the generic authorization bucket below.
+        return LarkCLIError(
+            _redact_cli_error(_append_secret_hint(message), args),
+            kind="config",
         )
     if str(code) in {"99991672", "99991679"} or any(
         marker in lower
@@ -424,6 +424,49 @@ def _run_lark(
         time.sleep(2**attempt)
     assert last_error is not None
     raise last_error
+
+
+def _append_secret_hint(message: str) -> str:
+    """Explain the isolated-profile keychain limitation when the CLI cannot."""
+    lowered = message.casefold()
+    if "client_secret" not in lowered and "config init --new" not in lowered:
+        return message
+    return (
+        message
+        + " | the isolated Skill profile references an App Secret stored in the "
+        "global lark-cli keychain, which cannot be decrypted from the isolated "
+        "configuration directory. Copy the App Secret from the Feishu Open "
+        "Platform console (open.feishu.cn) and run the supported stdin init: "
+        "`printf %s '<APP_SECRET>' | lark config init --app-id <APP_ID> "
+        "--app-secret-stdin` (do not run `config init --new`)."
+    )
+
+
+def probe_app_secret_resolution() -> dict[str, Any]:
+    """Check the isolated profile can actually decrypt its App Secret.
+
+    Starts one device-authorization request (no user action, no state change;
+    the pending code simply expires) because keychain-backed secrets only
+    surface as masked values in `config show` — resolution can only be proven
+    by a call that uses the secret.
+    """
+    try:
+        _run_lark(["auth", "login", "--domain", "base", "--no-wait", "--json"], retries=1)
+    except LarkCLIError as exc:
+        message = str(exc)
+        if "client_secret" in message:
+            return {
+                "resolvable": False,
+                "reason": "keychain_secret_not_migratable",
+                "remediation": (
+                    "copy the App Secret from the Feishu Open Platform console "
+                    "(open.feishu.cn) for the bound App ID, then run "
+                    "`printf %s '<APP_SECRET>' | <skill> lark config init "
+                    "--app-id <APP_ID> --app-secret-stdin`"
+                ),
+            }
+        return {"resolvable": False, "reason": "api_error", "message": message[:200]}
+    return {"resolvable": True}
 
 
 def _items(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -615,13 +658,6 @@ def _logical_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[s
         "tags": [str(tag) for tag in tags],
         "read_status": "未读",
     }
-
-
-def build_record(article: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
-    """Build a record using the standard field names (compatibility helper)."""
-    logical = _logical_record(article, metadata)
-    logical["tags"] = ", ".join(logical["tags"])
-    return {FIELD_SPECS[key]["name"]: value for key, value in logical.items()}
 
 
 def _select_options(field: dict[str, Any]) -> set[str]:

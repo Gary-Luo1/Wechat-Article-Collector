@@ -1,5 +1,79 @@
 # Changelog
 
+## 2.4.0 - Unreleased
+
+### Fixed (adversarial-review hardening)
+
+- Pagination cannot loop unboundedly on hostile/broken responses: requests now
+  carry the page size, duplicate and fully-unusable pages stop the loop, and a
+  hard page cap bounds the worst case.
+- `curl_cffi` transport timeouts are classified as transient and retried
+  (previously mis-classified as fatal on current curl_cffi versions).
+- Config schema version bumped to 11: upgrading from v10 now writes the
+  `config.v10.backup.json` backup instead of silently discarding the removed
+  WeChat section; removed keys (`article_source`, `unlisted_publisher`) no
+  longer persist forever inside settings/setup.
+- Discovery: a 3203 "no data" listing reports the subscription as unresolved
+  (likely mistyped alias) without arming the paid cooldown; a queue failure
+  after a successful paid listing still arms the cooldown; ISO/minute-only
+  publishTime strings parse correctly.
+- Processing: redfox fetch failures surface through the protocol envelope
+  instead of a raw traceback (batch-read continues past failed articles);
+  oversized bodies are truncated with a marker instead of becoming permanently
+  unreadable; detail-code 3203 gets a "not crawled yet, retry later" message;
+  pre-redfox queue entries are retired once with disposition
+  `legacy_unreadable` instead of blocking reads forever.
+- Untrusted API text (title/digest/body) is truncated and stripped of control
+  and Unicode tag characters; untrusted-content markers now carry an
+  unpredictable nonce so a malicious body cannot forge the trusted trailing
+  output.
+- State machine: subscriptions without a WeChat alias are consistently
+  unresolved everywhere (next_stage, progress, `subscriptions add`, setup
+  guide) because the data source queries by alias only; the dead
+  `--save-resolved` flag and `--unlisted-publisher` guide command were
+  removed; `doctor --online` reports the billed probe call.
+
+### BREAKING
+
+- Removed dead code left by the redfox-only switch: the WeChat subscription
+  resolution module, the `RequestPacer` helper, risk-control page markers, the
+  ingest exception classes, and unused queue imports. Scripts are pyflakes-clean.
+- The WeChat cookie/token discovery path is removed; the redfox.hk paid API is
+  the only article data source. `settings.article_source`, the `wechat`
+  config section and `health.wechat`, `WECHAT_*` error codes, the WeChat API
+  client module, `manage article-source`, `discover --check-token` /
+  `--resolve-subscriptions`, and the direct-fetch fallback during processing
+  are all gone. Queued articles are read from their cached redfox body;
+  entries without one must be re-discovered or dismissed. `process ingest`
+  and the direct article-page fetcher are removed too: articles enter the
+  queue only through redfox discovery.
+
+### Added
+
+- `feishu-local-profile import` now probes whether the isolated profile can decrypt
+  the imported App Secret (macOS keychain secrets do not migrate across lark-cli
+  configuration directories) and reports an explicit console-copy remediation instead
+  of failing later during device authorization. Device-authorization errors about a
+  missing `client_secret` are classified as a configuration gap with the same
+  guidance, no longer as a generic authorization failure suggesting the blocked
+  `config init --new`.
+- Optional `redfox.hk` paid API as an article data source
+  (`settings.article_source: wechat | redfox`, default `wechat`). The redfox
+  source needs no WeChat cookie/token: account resolution, article listing,
+  and (optionally cached) article bodies come from the API, with the direct
+  mp.weixin.qq.com path fully preserved as the default and fallback.
+- `manage redfox-set-key` (stdin) and `manage redfox-status [--verify]` commands; article data comes from the redfox wide library (广域库), queried by wechat alias with newest-first paging and per-article lazy body fetching via the detail endpoint. the API key is stored
+  under `redfox.api_key` with the same 0600 stdin credentials baseline.
+- Billing-aware discovery: per-subscription cooldown (`last_discovered_at`)
+  skips paid calls inside the configured check interval and pagination stops
+  once an article older than the lookback window is seen.
+- Queue entries may carry `content`/`content_source` so processing can use a
+  body captured at discovery time instead of fetching mp.weixin.qq.com.
+- `REDFOX_*` structured error codes in the command protocol and doctor
+  coverage for the redfox source (credential presence and optional live
+  probe); WeChat health is no longer reported when the redfox source is
+  active.
+
 ## 2.3.0 - Unreleased
 
 ### Changed

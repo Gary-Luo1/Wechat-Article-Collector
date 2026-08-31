@@ -25,6 +25,25 @@ manage feishu-identity --as bot
 All later Base commands must use the confirmed identity with explicit `--as user`
 or `--as bot`.
 
+## Importing an existing local lark-cli profile (macOS keychain limitation)
+
+`manage feishu-local-profile scan` lists every global lark-cli profile and requires an
+explicit App ID selection, so multiple local configurations are always distinguished —
+never guessed. After `import --yes`, the Skill immediately probes whether the isolated
+profile can actually decrypt the App Secret. On macOS, lark-cli stores App Secrets in
+the system keychain bound to the global configuration directory, so the isolated clone
+usually cannot decrypt them (`app_secret_resolvable: false`). The remediation is a
+one-time copy of the App Secret from the Feishu Open Platform console
+(open.feishu.cn) piped through stdin:
+
+```text
+printf %s '<APP_SECRET>' | bash scripts/run.sh lark config init --app-id <APP_ID> --app-secret-stdin
+```
+
+Device-authorization errors mentioning a missing `client_secret` are classified as a
+configuration gap with this same guidance; never run `config init --new`, which the
+Skill blocks because it can replace unrelated app configuration.
+
 ## Current Feishu bot conversation
 
 When the setup conversation itself is arriving through a supported Feishu/Lark
@@ -211,9 +230,9 @@ Run `process feishu-schema` for the standard schema. Creation and schema extensi
 are external writes. Approve exact standard Base/table names once:
 
 ```text
-manage execution-policy set --mode autopilot --unlisted-publisher <POLICY> --feishu-provisioning allow --base-name <BASE_NAME> --table-name <TABLE_NAME> --feishu-sync <allow-or-deny>
+manage execution-policy set --mode autopilot --feishu-provisioning allow --base-name <BASE_NAME> --table-name <TABLE_NAME> --feishu-sync <allow-or-deny>
 # after the user confirms this one policy preview
-manage execution-policy set --mode autopilot --unlisted-publisher <POLICY> --feishu-provisioning allow --base-name <BASE_NAME> --table-name <TABLE_NAME> --feishu-sync <allow-or-deny> --yes
+manage execution-policy set --mode autopilot --feishu-provisioning allow --base-name <BASE_NAME> --table-name <TABLE_NAME> --feishu-sync <allow-or-deny> --yes
 manage feishu-create-base --name <BASE_NAME> --table-name <TABLE_NAME>
 ```
 

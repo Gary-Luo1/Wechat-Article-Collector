@@ -1,7 +1,7 @@
 # Automation contract
 
 Automation is opt-in. Include the schedule, network activity, credential expiry
-risk, unlisted-publisher behavior, and exact Feishu write boundary in the
+risk, and exact Feishu write boundary in the
 front-loaded configuration summary. Do not create a recurring schedule merely
 because setup succeeded; schedule creation remains a separate external change.
 

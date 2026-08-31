@@ -19,7 +19,6 @@ def _configured(monkeypatch: pytest.MonkeyPatch, home) -> None:
         {
             "confirmed": True,
             "mode": "autopilot",
-            "unlisted_publisher": "ask",
             "allow_feishu_provisioning": True,
             "provision_base_name": "公众号文章",
             "provision_table_name": "文章列表",

@@ -56,14 +56,12 @@ minimal template. The user chooses whether to send values in ordinary chat after
 a retention warning, edit that file directly, or use the local hidden-input
 setup. It front-loads configuration and collects:
 
-1. WeChat Cookie
-2. WeChat token
-3. Exact subscribed account names
-4. Article search window: 24 hours (recommended), 48 hours, 7 days, or custom
-5. Unlisted-publisher behavior: ask, ingest once, or auto-subscribe
-6. Required Feishu destination choice: skip, map an existing Base, or create a Base;
+1. A redfox.hk API key (the paid article data source)
+2. Subscribed accounts: exact names plus WeChat aliases (the API queries by alias)
+3. Article search window: 24 hours (recommended), 48 hours, 7 days, or custom
+4. Required Feishu destination choice: skip, map an existing Base, or create a Base;
    when selected, identity/App/manager/target or exact new Base/table names
-7. A bounded policy for automatic provisioning and qualified-record sync
+5. A bounded policy for automatic provisioning and qualified-record sync
 
 The Agent displays one summary and asks once. After the saved execution policy is
 confirmed, it validates, provisions, discovers, reads, scores, queues, exports, and
@@ -71,20 +69,18 @@ syncs automatically inside that unchanged scope. It pauses only for user-owned
 OAuth completion, unresolved ambiguity, expired credentials, new permissions or a
 changed target/schema, forced below-threshold writes, and destructive actions.
 
-Open `https://mp.weixin.qq.com/` and sign in first; do not open a deep token page.
-In browser developer tools, choose Application → Storage → Cookies →
-`https://mp.weixin.qq.com/`, copy every cookie row, and join them as
-`name=value; name=value`. Copy the numeric `token` query parameter from the
-current authenticated page URL. Never use `/wxamp/`. The Cookie
-commonly contains `rand_info` and `slave_bizuin`; session keys may include
-`slave_sid`, `slave_user`, `bizuin`/`data_bizuin`, and `data_ticket`. These names
-are diagnostics only—the user must copy the complete header.
+Create an API key at `https://redfox.hk/` first. The key is piped through stdin
+(`printf %s '<KEY>' | bash scripts/run.sh manage redfox-set-key`) or entered in
+the local hidden-input setup; it is never accepted as a command-line argument.
+Article data comes from the redfox wide library (广域库), which identifies
+accounts by WeChat alias, so subscriptions should include each account's
+WeChat alias (微信号).
 
 The search window is persisted as `settings.check_hours`. If the user skips the
 choice, the Agent explicitly announces the 24-hour default instead of applying
 it silently.
 
-Cookie and token are account-session secrets. A normal chat message is not encrypted by this Skill and may be retained by the Agent platform. The Agent must warn about this first, obtain consent, never repeat a secret, and keep credentials out of command-line arguments, repository files, arbitrary temporary files, and logs. Not repeating a secret only avoids a second copy in Agent output; it does not remove or encrypt the user's original chat message. The local configuration is plaintext UTF-8 JSON protected by the current OS account permissions; it is not encrypted and must not be committed, synced, uploaded, or shared.
+The redfox API key is an account secret. A normal chat message is not encrypted by this Skill and may be retained by the Agent platform. The Agent must warn about this first, obtain consent, never repeat a secret, and keep credentials out of command-line arguments, repository files, arbitrary temporary files, and logs. Not repeating a secret only avoids a second copy in Agent output; it does not remove or encrypt the user's original chat message. The local configuration is plaintext UTF-8 JSON protected by the current OS account permissions; it is not encrypted and must not be committed, synced, uploaded, or shared.
 
 The Agent prefers process standard input. When its execution tool has no stdin channel, it requests a restricted one-time inbox in the application-state directory, writes through its filesystem API, and asks the bounded writer to consume and delete that inbox. The writer validates the payload, applies safe defaults, stores it atomically outside the Skill installation, and prints only a redacted summary. If neither transport exists, use the local hidden-input fallback:
 
@@ -175,16 +171,14 @@ article URL are required; other fields are optional.
 The examples below use the macOS/Linux wrapper. On Windows PowerShell, replace `bash scripts/run.sh` with `.\scripts\run.ps1`.
 
 ```bash
-bash scripts/run.sh discover --check-token
-bash scripts/run.sh discover --resolve-subscriptions --format json
-bash scripts/run.sh process --format json ingest --url "https://mp.weixin.qq.com/s/..."
 bash scripts/run.sh discover --hours 24
 bash scripts/run.sh manage doctor
 bash scripts/run.sh manage doctor --online
+bash scripts/run.sh manage redfox-status --verify
 bash scripts/run.sh manage status
 bash scripts/run.sh manage config-show
 bash scripts/run.sh manage execution-policy show
-bash scripts/run.sh manage execution-policy set --mode autopilot --unlisted-publisher ask --feishu-provisioning deny --feishu-sync deny --yes
+bash scripts/run.sh manage execution-policy set --mode autopilot --feishu-provisioning deny --feishu-sync deny --yes
 bash scripts/run.sh manage feishu-identity --as user
 bash scripts/run.sh manage feishu-auth start
 bash scripts/run.sh manage feishu-auth complete
@@ -231,14 +225,7 @@ be changed at any time, and dismissed articles can be restored by stable URL.
 `digest-plan` only filters and orders queued metadata; it never fetches article
 content, completes an article, changes the five-dimension score, or writes Feishu.
 
-Users may also paste a WeChat article link directly. The Agent detects its publisher
-and queues it without requiring subscription discovery. For a new publisher, it
-applies the confirmed `ask`, `ingest_once`, or `auto_subscribe` rule; only `ask`
-causes a new question. An explicit request to write an individual article below the
-normal score threshold remains a one-off authorization and does not change the
-saved threshold.
-
-`doctor` provides resumable setup state, redacted health diagnostics, dependency/version checks, and a concrete `next_action`. Configuration can be patched by section through Agent stdin, so changing subscriptions, language/preferences, WeChat credentials, or Feishu never requires re-entering unrelated secrets. Reset commands preview their exact local targets unless `--yes` is supplied. See the Skill's operations and automation references for machine-readable protocol and scheduling rules.
+`doctor` provides resumable setup state, redacted health diagnostics, dependency/version checks, and a concrete `next_action`. Configuration can be patched by section through Agent stdin, so changing subscriptions, language/preferences, the redfox key, or Feishu never requires re-entering unrelated secrets. Reset commands preview their exact local targets unless `--yes` is supplied. See the Skill's operations and automation references for machine-readable protocol and scheduling rules.
 
 ## Repository structure
 

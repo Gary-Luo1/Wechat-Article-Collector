@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Discover recent articles and append them to the local queue."""
+"""Discover recent articles via the redfox API and append them to the queue."""
 
 from __future__ import annotations
 
@@ -7,111 +7,53 @@ import argparse
 import logging
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
-from config_store import ConfigError, load_config, modify_config, update_health
+from config_store import ConfigError, load_config, modify_config
 from protocol import dump, failure, success
 from queue_helpers import add_pending, cleanup_processed
-from subscription_resolution import exact_matches, sanitize_candidates, subscription_query
-from url_identity import canonicalize_wechat_article_url
-from wechat_api import (
-    WeChatAPI,
-    WeChatAccessRestricted,
-    WeChatAPIError,
-    WeChatCookieExpired,
-    WeChatCredentialContextError,
-    WeChatRateLimitError,
-    WeChatTokenExpired,
-)
+from redfox_client import RedfoxAPIError, RedfoxClient
 
 
 logger = logging.getLogger("wechat-discover")
 
 
-def resolve_subscriptions(
-    config: dict,
-    *,
-    api: WeChatAPI | None = None,
-    save: bool = False,
-    config_path: Path | None = None,
-) -> list[dict]:
-    client = api or WeChatAPI(
-        config["wechat"]["cookie"],
-        config["wechat"]["token"],
-        request_delay=config["settings"]["request_delay"],
-    )
-    results: list[dict] = []
-    unresolved = 0
-    pending: list[tuple[tuple[str, str, str], tuple[str, str, str]]] = []
-    for subscription in config["subscriptions"]:
-        name = str(subscription.get("name", "")).strip()
-        alias = str(subscription.get("alias", "")).strip()
-        biz = str(subscription.get("biz", "")).strip()
-        query = subscription_query(subscription)
-        if biz:
-            results.append(
-                {"query": query, "status": "resolved", "name": name, "alias": alias, "biz": biz}
-            )
-            continue
-        candidates = client.search_account(query, count=5)
-        sanitized = sanitize_candidates(candidates)
-        exact = exact_matches(subscription, sanitized)
-        if len(exact) == 1 and exact[0]["biz"]:
-            status = "exact"
-            if save:
-                pending.append(
-                    (
-                        (
-                            str(subscription.get("name", "")).strip(),
-                            str(subscription.get("alias", "")).strip(),
-                            str(subscription.get("biz", "")).strip(),
-                        ),
-                        (
-                            exact[0]["biz"],
-                            str(subscription.get("name", "")).strip()
-                            or str(exact[0].get("name", "")).strip(),
-                            str(subscription.get("alias", "")).strip()
-                            or str(exact[0].get("alias", "")).strip(),
-                        ),
-                    )
-                )
-        elif len(exact) > 1:
-            status = "ambiguous"
-            unresolved += 1
-        else:
-            status = "not_found"
-            unresolved += 1
-        results.append(
-            {"query": query, "status": status, "exact": exact, "candidates": sanitized}
-        )
-    if save and pending:
-        def mutate(config: dict) -> dict:
-            for original, resolved in pending:
-                for sub in config["subscriptions"]:
-                    if (
-                        str(sub.get("name", "")).strip(),
-                        str(sub.get("alias", "")).strip(),
-                        str(sub.get("biz", "")).strip(),
-                    ) == original:
-                        sub["biz"] = resolved[0]
-                        if not str(sub.get("name", "")).strip():
-                            sub["name"] = resolved[1]
-                        if not str(sub.get("alias", "")).strip():
-                            sub["alias"] = resolved[2]
-                        break
-            return config
-
-        modify_config(mutate, path=config_path)
+def _subscription_cooldown_active(subscription: dict, interval_hours: float) -> bool:
+    """Paid-API guard: skip a subscription still inside its discovery cooldown."""
+    raw = str(subscription.get("last_discovered_at", "")).strip()
+    if not raw:
+        return False
     try:
-        update_health(
-            "subscriptions",
-            success=unresolved == 0,
-            unresolved=unresolved,
-            path=config_path,
+        last = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last).total_seconds() < interval_hours * 3600
+
+
+def _mark_subscription_discovered(identity: tuple[str, str, str], config_path: Path | None) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+
+    def mutate(saved: dict) -> dict:
+        for sub in saved["subscriptions"]:
+            if (
+                str(sub.get("name", "")).strip(),
+                str(sub.get("alias", "")).strip(),
+                str(sub.get("biz", "")).strip(),
+            ) == identity:
+                sub["last_discovered_at"] = now
+                return saved
+        # A concurrent edit changed the subscription identity; without the
+        # timestamp the paid-call cooldown cannot apply next cycle.
+        logger.warning(
+            "subscription %s changed during discovery; cooldown timestamp not saved",
+            "/".join(part or "-" for part in identity),
         )
-    except ConfigError:
-        pass
-    return results
+        return saved
+
+    modify_config(mutate, path=config_path)
 
 
 def discover_articles(
@@ -121,130 +63,121 @@ def discover_articles(
     diagnostics: list[dict] | None = None,
     on_account_articles: Callable[[list[dict]], int] | None = None,
 ) -> list[dict]:
-    wechat = config["wechat"]
-    settings = config["settings"]
-    api = WeChatAPI(
-        wechat["cookie"],
-        wechat["token"],
-        request_delay=settings["request_delay"],
-    )
+    """Discover articles through the paid redfox API (billing-aware)."""
+    api_key = config["redfox"]["api_key"].strip()
+    if not api_key:
+        raise ConfigError("redfox API key is missing; run the redfox key setup command")
+    client = RedfoxClient(api_key, request_delay=config["settings"]["request_delay"])
     cutoff = time.time() - hours * 3600
+    interval_hours = float(config["settings"]["check_hours"])
     discovered: list[dict] = []
-    for subscription in config["subscriptions"]:
-        name = str(subscription.get("name", "")).strip()
-        alias = str(subscription.get("alias", "")).strip()
-        biz = str(subscription.get("biz", "")).strip()
-        diagnostic = {
-            "account": name or alias,
-            "status": "pending",
-            "fetched": 0,
-            "recent": 0,
-            "outside_window": 0,
-            "invalid": 0,
-            "queued": 0,
-        }
-        try:
-            if not biz:
-                account = api.get_account(name=name, alias=alias)
-                if not account:
-                    logger.warning("No exact account match for %s; skipping", alias or name)
+    try:
+        for subscription in config["subscriptions"]:
+            name = str(subscription.get("name", "")).strip()
+            alias = str(subscription.get("alias", "")).strip()
+            biz = str(subscription.get("biz", "")).strip()
+            diagnostic = {
+                "account": name or alias,
+                "status": "pending",
+                "fetched": 0,
+                "recent": 0,
+                "outside_window": 0,
+                "invalid": 0,
+                "queued": 0,
+                "skipped_cooldown": 0,
+            }
+            try:
+                if not alias:
+                    # The wide library identifies accounts by wechat alias
+                    # only; neither a display name nor a bare biz id can be
+                    # queried.
+                    if name or biz:
+                        logger.warning(
+                            "subscription %s has no wechat alias; the redfox wide "
+                            "library cannot query it by display name",
+                            name or biz,
+                        )
                     diagnostic["status"] = "unresolved"
                     if diagnostics is not None:
                         diagnostics.append(diagnostic)
                     continue
-                biz = str(account.get("fakeid", ""))
-                if not biz:
-                    logger.warning("Account %s has no fakeid; skipping", alias or name)
-                    diagnostic["status"] = "missing_biz"
+                if _subscription_cooldown_active(subscription, interval_hours):
+                    diagnostic["status"] = "ok"
+                    diagnostic["skipped_cooldown"] = 1
                     if diagnostics is not None:
                         diagnostics.append(diagnostic)
                     continue
-                original = (name, alias, "")
-
-                def mutate(saved: dict) -> dict:
-                    for sub in saved["subscriptions"]:
-                        if (
-                            str(sub.get("name", "")).strip(),
-                            str(sub.get("alias", "")).strip(),
-                            str(sub.get("biz", "")).strip(),
-                        ) == original:
-                            sub["biz"] = biz
-                            break
-                    return saved
-
-                modify_config(mutate, path=config_path)
-                subscription["biz"] = biz
-            limit = int(settings["max_articles_per_account"])
-            begin = 0
-            articles: list[dict] = []
-            while len(articles) < limit:
-                batch, _ = api.list_articles(
-                    biz, begin=begin, count=min(5, limit - len(articles))
+                limit = int(config["settings"]["max_articles_per_account"])
+                raw_articles, listing_info = client.list_articles(
+                    account=alias,
+                    cutoff_epoch=cutoff,
+                    max_articles=limit,
                 )
-                articles.extend(batch)
-                if len(batch) < 5 or not batch:
-                    break
-                if int(batch[-1].get("update_time", 0) or 0) < cutoff:
-                    break
-                begin += len(batch)
-            diagnostic["fetched"] = len(articles[:limit])
-            account_articles: list[dict] = []
-            for raw in articles[:limit]:
-                try:
-                    article = api.format_article(raw)
+                diagnostic["fetched"] = len(raw_articles)
+                if listing_info["empty_reason"] == "no_data":
+                    # 3203: this library has no such account — most likely a
+                    # mistyped alias. Report it instead of hiding behind an
+                    # empty "ok" run, and do not arm the paid cooldown.
+                    diagnostic["status"] = "unresolved"
+                    diagnostic["error"] = "account_not_found"
+                    if diagnostics is not None:
+                        diagnostics.append(diagnostic)
+                    continue
+                account_articles: list[dict] = []
+                for article in raw_articles:
                     if not article["title"] or not article["link"]:
                         diagnostic["invalid"] += 1
                         continue
-                    link = canonicalize_wechat_article_url(article["link"])
-                    digest = str(article.get("digest", "") or "")
-                    update_time = article["update_time"]
-                    if update_time < cutoff:
+                    if article["update_time"] and article["update_time"] < cutoff:
                         diagnostic["outside_window"] += 1
                         continue
-                except (AttributeError, KeyError, TypeError, ValueError):
-                    # One malformed article must not discard valid articles or
-                    # prevent the remaining subscriptions from being scanned.
-                    diagnostic["invalid"] += 1
-                    continue
-                account_articles.append(
-                    {
+                    entry = {
                         "title": article["title"],
-                        "link": link,
-                        "digest": digest,
+                        "link": article["link"],
+                        "digest": article["digest"],
                         "account": name or alias,
                         "account_id": alias or biz,
-                        "update_time": update_time,
+                        "update_time": article["update_time"],
+                        "content_source": "redfox",
                     }
-                )
-                diagnostic["recent"] += 1
-            if on_account_articles is not None:
-                diagnostic["queued"] = on_account_articles(account_articles)
-            discovered.extend(account_articles)
-            diagnostic["status"] = "ok"
-            if diagnostics is not None:
-                diagnostics.append(diagnostic)
-        except (WeChatTokenExpired, WeChatCookieExpired, WeChatCredentialContextError,
-                WeChatAccessRestricted,
-                WeChatRateLimitError, WeChatAPIError) as exc:
-            diagnostic["status"] = "blocked"
-            diagnostic["error"] = type(exc).__name__
-            if diagnostics is not None:
-                diagnostics.append(diagnostic)
-            raise
+                    if article["work_uuid"]:
+                        entry["work_uuid"] = article["work_uuid"]
+                    account_articles.append(entry)
+                    diagnostic["recent"] += 1
+                try:
+                    if on_account_articles is not None:
+                        diagnostic["queued"] = on_account_articles(account_articles)
+                except Exception:
+                    # The paid listing already succeeded; arm the cooldown so a
+                    # persistent queue failure cannot re-charge every cycle.
+                    _mark_subscription_discovered((name, alias, biz), config_path)
+                    raise
+                discovered.extend(account_articles)
+                diagnostic["status"] = "ok"
+                if listing_info["empty_reason"] == "outside_window" and not account_articles:
+                    diagnostic["window_empty"] = True
+                if diagnostics is not None:
+                    diagnostics.append(diagnostic)
+                _mark_subscription_discovered((name, alias, biz), config_path)
+            except RedfoxAPIError as exc:
+                diagnostic["status"] = "blocked"
+                diagnostic["error"] = type(exc).__name__
+                if diagnostics is not None:
+                    diagnostics.append(diagnostic)
+                raise
+    finally:
+        client.close()
     return discovered
+
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--check-token", action="store_true")
     parser.add_argument("--hours", type=float)
-    parser.add_argument("--resolve-subscriptions", action="store_true")
-    parser.add_argument("--save-resolved", action="store_true")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     arguments = parser.parse_args(argv)
     json_output = arguments.format == "json"
-    config = None
     diagnostics: list[dict] = []
     queued = 0
 
@@ -277,44 +210,13 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     try:
-        config = load_config(arguments.config, require_wechat=True)
-        if arguments.check_token:
-            api = WeChatAPI(
-                config["wechat"]["cookie"],
-                config["wechat"]["token"],
-                request_delay=config["settings"]["request_delay"],
-            )
-            api.search_account("微信", count=1)
-            config = update_health("wechat", success=True, path=arguments.config)
-            data = {"credentials": "valid", "last_verified": config["health"]["wechat"]}
-            print(dump(success(data, next_action="verify_subscriptions")) if json_output else "WeChat credentials are valid")
-            return 0
-        if arguments.resolve_subscriptions:
-            results = resolve_subscriptions(
-                config, save=arguments.save_resolved, config_path=arguments.config
-            )
-            unresolved = sum(item["status"] in {"ambiguous", "not_found"} for item in results)
-            data = {"subscriptions": results, "unresolved": unresolved, "saved": arguments.save_resolved}
-            if json_output:
-                print(
-                    dump(
-                        success(
-                            data,
-                            next_action=(
-                                "ask_user_to_disambiguate" if unresolved else "run_discovery"
-                            ),
-                        )
-                    )
-                )
-            else:
-                for item in results:
-                    print(f"{item['query']}: {item['status']}")
-            return 0 if unresolved == 0 else 4
-        if arguments.save_resolved:
-            raise ValueError("--save-resolved requires --resolve-subscriptions")
+        config = load_config(arguments.config)
+        if not config["redfox"]["api_key"].strip():
+            raise ConfigError("redfox API key is missing; run the redfox key setup command")
         if not config["subscriptions"]:
             raise ConfigError("no subscriptions configured")
         hours = arguments.hours or float(config["settings"]["check_hours"])
+
         def persist_account(articles: list[dict]) -> int:
             nonlocal queued
             added = add_pending(
@@ -332,10 +234,6 @@ def main(argv: list[str] | None = None) -> int:
             persist_account,
         )
         cleanup_processed()
-        try:
-            update_health("wechat", success=True, path=arguments.config)
-        except ConfigError:
-            pass
         data = {
             "hours": hours,
             "discovered": len(articles),
@@ -353,23 +251,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             print(f"Discovered {len(articles)} recent articles; queued {queued} new articles")
         return 0
-    except (WeChatTokenExpired, WeChatCookieExpired, WeChatAccessRestricted) as exc:
-        if config is not None:
-            try:
-                update_health("wechat", success=False, failure_kind=type(exc).__name__, path=arguments.config)
-            except ConfigError:
-                pass
-        report_failure(exc)
-        return 2
-    except WeChatCredentialContextError as exc:
-        if config is not None:
-            try:
-                update_health("wechat", success=False, failure_kind=type(exc).__name__, path=arguments.config)
-            except ConfigError:
-                pass
-        report_failure(exc)
-        return 3
-    except (ConfigError, WeChatRateLimitError, WeChatAPIError, ValueError) as exc:
+    except (ConfigError, RedfoxAPIError, ValueError) as exc:
         report_failure(exc)
         return 1
 

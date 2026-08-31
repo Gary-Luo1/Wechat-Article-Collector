@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 from copy import deepcopy
+import hashlib
 import io
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,18 +22,17 @@ from bitable_client import (
 from config_store import DEFAULT_CONFIG, ConfigError, load_config, modify_config, update_health
 from execution_policy import autopilot_policy, invalidate_for_feishu_change
 from feishu_target import production_feishu_target
-from http_client import RequestPacer, new_session
 from protocol import dump, failure, success
 from queue_helpers import (
+    cache_article_content,
     cleanup_processed,
+    retire_legacy_pending,
     complete_article,
     dismiss_article,
     export_queue,
     get_pending,
-    add_pending,
-    pending_sync_entries,
-    read_queue,
     has_verified_read,
+    pending_sync_entries,
     record_verified_read,
     resolve_pending,
     restore_dismissed,
@@ -44,40 +45,9 @@ from scoring_rubric import (
     is_advertisement,
     should_sync,
 )
-from subscription_resolution import matches_subscription
-from url_identity import canonicalize_wechat_article_url
 
 
 logger = logging.getLogger("wechat-process")
-
-
-def fetch_article(url: str, **kwargs: Any) -> dict[str, Any]:
-    from article_reader import fetch_article as fetch
-
-    return fetch(url, **kwargs)
-
-
-def fetch_article_text(url: str, **kwargs: Any) -> str:
-    from article_reader import fetch_article_text as fetch
-
-    return fetch(url, **kwargs)
-
-
-class ArticlePublisherUnknown(ValueError):
-    def __init__(self, details: dict[str, Any]):
-        super().__init__(
-            "the article publisher could not be detected; ask the user for the "
-            "Official Account name, then apply the saved unlisted-publisher policy"
-        )
-        self.details = details
-
-
-class SubscriptionConfirmationRequired(ValueError):
-    def __init__(self, details: dict[str, Any]):
-        super().__init__(
-            "the article publisher is not subscribed; ask the user whether to add it"
-        )
-        self.details = details
 
 
 class ArticleReadRequiredError(ValueError):
@@ -89,21 +59,6 @@ class ArticleReadRequiredError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("read the article successfully before scoring or completing it")
-
-
-class BatchRiskControlError(ValueError):
-    """Expose a safe, structured stop point for automated batch readers."""
-
-    code = "ARTICLE_RISK_CONTROL"
-    retryable = False
-    next_action = "wait_before_retry"
-
-    def __init__(self, article: dict[str, Any], successful: int) -> None:
-        super().__init__(f"WeChat risk control stopped the batch after {successful} successful article(s)")
-        self.details = {
-            "blocked_url": str(article.get("link", "")),
-            "successful": successful,
-        }
 
 
 def _resolve(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -225,45 +180,83 @@ def cmd_digest_plan(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def _configured_request_delay() -> float:
+def _load_article_text(article: dict[str, Any]) -> str:
+    """Return the cached body, or fetch it once via the paid detail endpoint."""
+    cached = str(article.get("content") or "").strip()
+    if cached:
+        return cached
+    work_uuid = str(article.get("work_uuid") or "").strip()
+    if not work_uuid:
+        raise ValueError(
+            "this queued article has neither a cached body nor a redfox "
+            "work_uuid; re-run discover, or dismiss it"
+        )
+    config = load_config()
+    api_key = config["redfox"]["api_key"].strip()
+    if not api_key:
+        raise ConfigError("redfox API key is missing; run the redfox key setup command")
+    from redfox_client import RedfoxClient, clean_content
+
+    client = RedfoxClient(api_key)
     try:
-        return float(load_config()["settings"]["request_delay"])
-    except ConfigError:
-        return float(DEFAULT_CONFIG["settings"]["request_delay"])
+        detail, api_code = client.query_work(work_uuid)
+        text = clean_content(detail.get("content"))
+    finally:
+        client.close()
+    if not text:
+        if api_code == 3203:
+            raise ValueError(
+                "the redfox library has not crawled this article's body yet; "
+                "retry after a later sync cycle or dismiss it"
+            )
+        raise ValueError(
+            "redfox returned no content for this article; dismiss it or contact "
+            "the data source — retrying will not help"
+        )
+    # Cache so re-reads never pay for the same body twice.
+    cache_article_content(str(article["link"]), text)
+    return text
 
 
-def _print_article(
-    article: dict[str, Any],
-    *,
-    session: Any | None = None,
-    pacer: RequestPacer | None = None,
-) -> tuple[str, bool]:
+def _print_article(article: dict[str, Any]) -> tuple[str, bool]:
+    from redfox_client import RedfoxAPIError
+
+    try:
+        return _print_article_unprotected(article)
+    except RedfoxAPIError as exc:
+        # Keep the protocol envelope intact for automation: the caller of
+        # main() does not catch RuntimeError subclasses.
+        raise ValueError(f"redfox content fetch failed: {exc}") from exc
+
+
+def _print_article_unprotected(article: dict[str, Any]) -> tuple[str, bool]:
     print(f"Title: {article.get('title', '')}")
     print(f"Account: {article.get('account', '')}")
     print(f"URL: {article.get('link', '')}")
     print(f"Digest: {article.get('digest', '')}")
-    print("\n--- BEGIN UNTRUSTED ARTICLE CONTENT ---")
-    document = fetch_article(str(article["link"]), session=session, pacer=pacer)
-    text = str(document["text"])
+    text = _load_article_text(article)
+    # The nonce makes the untrusted-content boundary impossible to forge from
+    # inside the body (a plain fixed marker could be echoed by a malicious
+    # article to fake trusted trailing output).
+    nonce = hashlib.sha256(
+        (str(article["link"]) + str(time.time_ns())).encode()
+    ).hexdigest()[:8]
+    print(f"\n--- BEGIN UNTRUSTED ARTICLE CONTENT {nonce} ---")
     record_verified_read(str(article["link"]), text)
     print(text)
-    print("--- END UNTRUSTED ARTICLE CONTENT ---")
+    print(f"--- END UNTRUSTED ARTICLE CONTENT {nonce} ---")
+    print(f"Content source: {article.get('content_source') or 'direct'}")
     suspected = is_advertisement(str(article.get("title", "")), text or "")
     print(f"Ad heuristic: {'suspected' if suspected else 'not detected'}")
     return text, suspected
 
 
 def cmd_read(arguments: argparse.Namespace) -> int:
-    _print_article(
-        _resolve(arguments),
-        pacer=RequestPacer(_configured_request_delay()),
-    )
+    _print_article(_resolve(arguments))
     return 0
 
 
 def cmd_batch_read(limit: int) -> int:
-    from article_reader import ArticleFetchError, WeChatRiskControlError
-
     pending = get_pending()
     if not pending:
         print("No pending articles")
@@ -271,121 +264,19 @@ def cmd_batch_read(limit: int) -> int:
     requested = min(limit, len(pending))
     successful = 0
     failures = 0
-    session = new_session()
-    pacer = RequestPacer(_configured_request_delay())
-    try:
-        for index, article in enumerate(pending[:limit], start=1):
-            print(f"\n===== ARTICLE {index}/{requested} =====")
-            try:
-                _print_article(article, session=session, pacer=pacer)
-                successful += 1
-            except WeChatRiskControlError as exc:
-                raise BatchRiskControlError(article, successful) from exc
-            except ArticleFetchError as exc:
-                failures += 1
-                print(f"[Article read failed: {exc.code}]")
-    finally:
-        session.close()
+    for index, article in enumerate(pending[:limit], start=1):
+        print(f"\n===== ARTICLE {index}/{requested} =====")
+        try:
+            _print_article(article)
+            successful += 1
+        except (ValueError, ConfigError) as exc:
+            failures += 1
+            print(f"[Article read failed: {exc}]")
     if len(pending) > limit:
         print(f"Stopped at --limit {limit}; {len(pending) - limit} articles remain")
     if failures:
         print(f"Batch read completed with {failures} failed article(s); {successful} succeeded")
         return 1
-    return 0
-
-
-def cmd_ingest(arguments: argparse.Namespace) -> int:
-    url = canonicalize_wechat_article_url(arguments.url)
-    document = fetch_article(url)
-    if not document:
-        raise ValueError("the WeChat article could not be fetched")
-    detected_account = str(document.get("account", "")).strip()
-    supplied_account = str(arguments.account or "").strip()
-    if detected_account and supplied_account and (
-        " ".join(detected_account.split()).casefold()
-        != " ".join(supplied_account.split()).casefold()
-    ):
-        raise ValueError(
-            "--account does not match the publisher detected in the article"
-        )
-    account = detected_account or supplied_account
-    details = {
-        "url": str(document["link"]),
-        "title": str(document.get("title", "")),
-        "detected_account": detected_account,
-    }
-    if not account:
-        raise ArticlePublisherUnknown(details)
-    config = load_config()
-    account_id = str(document.get("account_id", ""))
-    subscribed = matches_subscription(config["subscriptions"], account, account_id)
-    subscribe_requested = bool(arguments.subscribe)
-    no_subscribe_requested = bool(arguments.no_subscribe)
-    decision_source = "current_command" if (
-        subscribe_requested or no_subscribe_requested
-    ) else "existing_subscription"
-    if not subscribed and not subscribe_requested and not no_subscribe_requested:
-        policy = autopilot_policy(config)
-        publisher_policy = (
-            policy["unlisted_publisher"] if policy is not None else "ask"
-        )
-        if publisher_policy == "auto_subscribe":
-            subscribe_requested = True
-            decision_source = "persisted_execution_policy"
-        elif publisher_policy == "ingest_once":
-            no_subscribe_requested = True
-            decision_source = "persisted_execution_policy"
-        else:
-            raise SubscriptionConfirmationRequired(
-                {**details, "account": account, "already_subscribed": False}
-            )
-    # Validate queue state before mutating the subscription configuration.
-    read_queue()
-    subscription_added = False
-    if subscribe_requested and not subscribed:
-        def mutate_subscribe(config: dict[str, Any]) -> dict[str, Any]:
-            config["subscriptions"].append(
-                {
-                    key: value
-                    for key, value in {"name": account, "biz": account_id}.items()
-                    if value
-                }
-            )
-            return config
-
-        config = modify_config(mutate_subscribe)
-        subscribed = True
-        subscription_added = True
-    article = {
-        "title": str(document.get("title", "")) or "Untitled WeChat article",
-        "link": str(document["link"]),
-        "digest": str(document.get("digest", "")),
-        "account": account,
-        "account_id": account_id or account,
-        "update_time": int(document.get("update_time", 0) or 0),
-    }
-    added = add_pending(
-        [article],
-        content_dedup=bool(config["settings"]["content_dedup"]),
-    )
-    print(
-        json.dumps(
-            {
-                "status": "queued" if added else "already_known",
-                "queued": bool(added),
-                "article": article,
-                "publisher": {
-                    "name": account,
-                    "biz": account_id,
-                    "subscribed": subscribed,
-                    "subscription_added": subscription_added,
-                    "decision_source": decision_source,
-                },
-                "next_action": "read_score_and_optionally_sync_feishu",
-            },
-            ensure_ascii=False,
-        )
-    )
     return 0
 
 
@@ -496,6 +387,7 @@ def cmd_done(arguments: argparse.Namespace) -> int:
     if arguments.dry_run and not (arguments.feishu or policy_sync):
         raise ValueError("--dry-run is only valid together with --feishu")
     metadata = _score_metadata(arguments)
+    metadata["content_source"] = str(article.get("content_source") or "direct")
     sync_requested = bool(arguments.feishu or policy_sync)
     if sync_requested:
         if config is None:
@@ -650,23 +542,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_selector(read_parser)
     batch_parser = commands.add_parser("batch-read")
     batch_parser.add_argument("--limit", type=int, default=10)
-    ingest_parser = commands.add_parser("ingest")
-    ingest_parser.add_argument("--url", required=True, help="WeChat article URL")
-    ingest_parser.add_argument(
-        "--account",
-        help="publisher name supplied by the user only when page detection failed",
-    )
-    subscription_choice = ingest_parser.add_mutually_exclusive_group()
-    subscription_choice.add_argument(
-        "--subscribe",
-        action="store_true",
-        help="add a previously unlisted publisher after explicit user consent",
-    )
-    subscription_choice.add_argument(
-        "--no-subscribe",
-        action="store_true",
-        help="ingest once without changing subscriptions after explicit user choice",
-    )
     done_parser = commands.add_parser("done")
     _add_selector(done_parser)
     done_parser.add_argument("--ad", action="store_true")
@@ -725,8 +600,6 @@ def _dispatch(arguments: argparse.Namespace) -> int:
         if arguments.limit < 1 or arguments.limit > 100:
             raise ValueError("--limit must be between 1 and 100")
         return cmd_batch_read(arguments.limit)
-    if arguments.command == "ingest":
-        return cmd_ingest(arguments)
     if arguments.command == "done":
         if arguments.index is None and not arguments.link:
             raise ValueError("provide an index or --link")
@@ -750,6 +623,13 @@ def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     json_output = arguments.format == "json"
     output = io.StringIO()
+    retired = retire_legacy_pending()
+    if retired:
+        logger.info(
+            "retired %d pre-redfox queue entr%s (no body and no work_uuid)",
+            retired,
+            "y" if retired == 1 else "ies",
+        )
     try:
         with contextlib.redirect_stdout(output) if json_output else contextlib.nullcontext():
             result = _dispatch(arguments)
@@ -757,7 +637,6 @@ def main(argv: list[str] | None = None) -> int:
             lines = [line for line in output.getvalue().splitlines() if line.strip()]
             command_data: Any = {"command": arguments.command, "output": lines}
             if arguments.command in {
-                "ingest",
                 "inbox",
                 "inbox-mark",
                 "dismiss",

@@ -2,12 +2,12 @@
 
 ## Credentials
 
-- Treat the WeChat Cookie and token as account-session secrets.
+- Treat the redfox API key as an account secret.
 - Before requesting them in an Agent conversation, warn that ordinary chat messages may be retained by the platform and obtain explicit consent. Do not describe ordinary chat, a masked UI control, or the local configuration file as encrypted unless the current platform explicitly guarantees that property.
 - Ask for one value at a time and acknowledge receipt without quoting, summarizing, truncating, hashing, or otherwise reproducing the value.
 - Not echoing a value is output redaction, not encryption. It reduces repeat
   exposure in the Agent's replies, but the original user message may still be
-  stored and processed by the chat platform. If a Cookie/token was posted in
+  stored and processed by the chat platform. If the API key was posted in
   ordinary chat, treat it as disclosed to that platform even when the Agent
   never repeats it.
 - Keep the assembled configuration in memory and prefer `setup --agent-stdin` through the process standard-input channel. Never place secrets in command-line arguments, shell interpolation, environment variables, repository files, arbitrary temporary files, logs, or bug reports.
@@ -76,6 +76,6 @@ article bodies, mark articles complete, or write Feishu.
 - Never let autopilot authorize deletion, reset, profile mutation, a new App/identity/
   manager/target, schema expansion, new OAuth scopes, or a forced below-threshold write.
 
-## Private WeChat API
+## redfox.hk data source (optional)
 
-Discovery uses authenticated browser endpoints rather than a stable public API. Apply conservative delays, exact account matching, and low request volume. Stop on expired credentials or rate-limit responses. The network layer impersonates a real Chrome TLS/header fingerprint through `curl_cffi` when installed (falling back to plain `requests` only in degraded mode), applies the persisted delay to direct reads, and treats risk-control verification pages plus HTTP 403/429 as immediate stops that are never retried. A discovery run writes successful account results incrementally; a later blocking error reports partial progress without exposing credential-bearing URLs.
+The optional `redfox` article source is a paid third-party API. Its key baseline: piped via stdin only (in an interactive shell prefer `cat | manage redfox-set-key` so the key never enters shell history), persisted with 0600 permissions, redacted to the last four characters in every output, and never accepted as a command-line argument. The key is sent only to `redfox.hk` in the `X-API-Key` header. Every API call costs money, so discovery enforces a per-subscription cooldown, stops pagination at the lookback boundary, and `redfox-status` performs no network call unless `--verify` is passed explicitly. The wide library (广域库) endpoints identify accounts by wechat alias only. Failure codes (`REDFOX_AUTH`, `REDFOX_RATE_LIMITED`, `REDFOX_TRANSIENT`, `REDFOX_API_ERROR`) map into the standard command protocol; only rate-limit and transient failures are retryable.

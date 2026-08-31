@@ -23,8 +23,8 @@ def configured() -> dict:
     from config_store import DEFAULT_CONFIG, save_config
 
     config = json.loads(json.dumps(DEFAULT_CONFIG))
-    config["wechat"] = {"cookie": "cookie-secret", "token": "token-secret"}
-    config["subscriptions"] = [{"name": "Example"}]
+    config["redfox"] = {"api_key": "redfox-key-secret"}
+    config["subscriptions"] = [{"name": "Example", "alias": "example"}]
     save_config(config)
     return config
 
@@ -78,7 +78,7 @@ def test_partial_preferences_patch_preserves_defaults(
     assert saved["digest_hours"] == 24
 
 
-def test_setup_guide_explains_input_cookie_token_and_search_window(capsys):
+def test_setup_guide_explains_redfox_key_and_search_window(capsys):
     import init_config
 
     assert init_config.main(["--guide", "--format", "json"]) == 0
@@ -91,20 +91,11 @@ def test_setup_guide_explains_input_cookie_token_and_search_window(capsys):
     assert "original chat message" in data["input_location"]["not_echoing_effect"]
     assert data["local_config_file"]["encrypted"] is False
     assert data["local_config_file"]["path"].endswith("config.json")
-    assert data["local_config_file"]["required_fields"]["wechat.cookie"]
-    assert data["local_config_file"]["minimal_template"]["wechat"]["cookie"] == ""
-    assert data["wechat_credentials"]["login_url"] == "https://mp.weixin.qq.com/"
-    assert data["wechat_credentials"]["cookie_rule"].startswith("copy the complete")
-    assert data["wechat_credentials"]["cookie_diagnostic_keys"] == [
-        "rand_info",
-        "slave_bizuin",
-    ]
-    rendered = json.dumps(data)
-    assert "Application" in rendered
-    assert "Storage" in rendered
-    assert "Network" not in rendered
+    assert data["local_config_file"]["required_fields"]["redfox.api_key"]
+    assert data["local_config_file"]["minimal_template"]["redfox"] == {"api_key": ""}
+    assert "wechat" not in json.dumps(data["local_config_file"]["minimal_template"])
+    assert data["redfox_credentials"]["signup_url"] == "https://redfox.hk/"
     assert data["search_window"]["default_if_skipped"] == 24
-    assert "cgi-bin/home?t=home/index" not in rendered
     assert data["configuration_manifest"]["blocking_rule"]
 
 
@@ -114,16 +105,16 @@ def test_full_agent_setup_does_not_silently_skip_feishu(
     import init_config
     from config_store import load_config
 
+    configured()
     monkeypatch.setattr(
         init_config.sys,
         "stdin",
         io.StringIO(
             json.dumps(
                 {
-                    "wechat_cookie": "complete-cookie",
-                    "wechat_token": "123",
-                    "subscriptions": ["Example"],
+                    "redfox_api_key": "complete-key",
                     "settings": {"check_hours": 24},
+                    "feishu": {},
                 }
             )
         ),
@@ -141,10 +132,9 @@ def test_full_agent_setup_rerun_preserves_confirmed_policy_and_feishu(
     import init_config
     from config_store import load_config
 
+    configured()
     first = {
-        "wechat_cookie": "complete-cookie",
-        "wechat_token": "123",
-        "subscriptions": ["Example"],
+        "redfox_api_key": "complete-key",
         "feishu": {
             "destination": "existing",
             "enabled": True,
@@ -156,7 +146,6 @@ def test_full_agent_setup_rerun_preserves_confirmed_policy_and_feishu(
         "execution_policy": {
             "mode": "autopilot",
             "confirmed": True,
-            "unlisted_publisher": "auto_subscribe",
             "allow_feishu_sync": True,
         },
         "settings": {"check_hours": 24},
@@ -168,13 +157,12 @@ def test_full_agent_setup_rerun_preserves_confirmed_policy_and_feishu(
     assert load_config()["setup"]["execution_policy"]["confirmed"] is True
     assert load_config()["feishu"]["base_token"] == "bt-secret"
 
-    # Host re-runs the full setup without repeating feishu / execution_policy:
-    # previously the whole config was rebuilt from defaults and the confirmed
-    # policy plus Feishu binding were silently reset.
+    # Host re-runs the full setup without repeating the confirmed policy and
+    # the bound Feishu target: previously the whole config was rebuilt from
+    # defaults and the confirmed policy plus binding were silently reset.
     rerun = {
-        "wechat_cookie": "complete-cookie",
-        "wechat_token": "123",
-        "subscriptions": ["Example"],
+        "redfox_api_key": "complete-key",
+        "feishu": {"destination": "existing"},
     }
     monkeypatch.setattr(
         init_config.sys, "stdin", io.StringIO(json.dumps(rerun))
@@ -196,15 +184,13 @@ def test_full_agent_setup_partial_sections_merge_into_existing(
     import init_config
     from config_store import load_config
 
+    configured()
     first = {
-        "wechat_cookie": "complete-cookie",
-        "wechat_token": "123",
-        "subscriptions": ["Example"],
+        "redfox_api_key": "complete-key",
         "feishu": {"destination": "skip"},
         "execution_policy": {
             "mode": "autopilot",
             "confirmed": True,
-            "unlisted_publisher": "auto_subscribe",
         },
         "settings": {"check_hours": 24, "output_language": "zh"},
     }
@@ -216,10 +202,9 @@ def test_full_agent_setup_partial_sections_merge_into_existing(
     # Re-run full setup sending only one settings key and a policy mode change:
     # omitted settings / policy fields must survive (merge semantics).
     rerun = {
-        "wechat_cookie": "complete-cookie",
-        "wechat_token": "123",
-        "subscriptions": ["Example"],
-        "execution_policy": {"mode": "guided", "unlisted_publisher": "ask"},
+        "redfox_api_key": "complete-key",
+        "feishu": {"destination": "skip"},
+        "execution_policy": {"mode": "guided"},
         "settings": {"check_hours": 12},
     }
     monkeypatch.setattr(
@@ -231,7 +216,6 @@ def test_full_agent_setup_partial_sections_merge_into_existing(
     assert saved["settings"]["output_language"] == "zh"
     assert saved["setup"]["execution_policy"]["mode"] == "guided"
     assert saved["setup"]["execution_policy"]["confirmed"] is True
-    assert saved["setup"]["execution_policy"]["unlisted_publisher"] == "ask"
 
 
 def test_setup_guide_manual_template_is_loadable(capsys):
@@ -242,14 +226,14 @@ def test_setup_guide_manual_template_is_loadable(capsys):
     assert init_config.main(["--guide", "--format", "json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     template = payload["data"]["local_config_file"]["minimal_template"]
-    template["wechat"] = {"cookie": "complete-cookie", "token": "123"}
+    template["redfox"] = {"api_key": "complete-key"}
     template["subscriptions"] = [{"name": "Example"}]
     template["setup"]["search_window_confirmed"] = True
     target = config_path()
     target.parent.mkdir(parents=True)
     target.write_text(json.dumps(template), encoding="utf-8")
-    config = load_config(require_wechat=True)
-    assert config["wechat"]["token"] == "123"
+    config = load_config()
+    assert config["redfox"]["api_key"] == "complete-key"
     assert config["setup"]["search_window_confirmed"] is True
 
 
@@ -262,8 +246,7 @@ def test_prepare_and_validate_local_file_never_overwrites(capsys):
     assert prepared["data"]["created"] is True
     assert prepared["data"]["overwritten"] is False
     assert prepared["data"]["missing_fields"] == [
-        "wechat.cookie",
-        "wechat.token",
+        "redfox.api_key",
         "subscriptions",
         "settings.check_hours confirmation",
         "feishu.destination confirmation",
@@ -300,8 +283,7 @@ def test_validate_local_file_is_complete_and_redacted(capsys):
     payload = json.loads(capsys.readouterr().out)
     rendered = json.dumps(payload)
     assert payload["data"]["complete"] is False
-    assert "cookie-secret" not in rendered
-    assert "token-secret" not in rendered
+    assert "redfox-key-secret" not in rendered
     assert payload["data"]["credentials_echoed"] is False
 
 
@@ -346,7 +328,6 @@ def test_config_migration_recovers_old_confirmed_feishu_decision():
                     "execution_policy": {
                         "confirmed": True,
                         "mode": "autopilot",
-                        "unlisted_publisher": "ask",
                         "allow_feishu_provisioning": False,
                         "provision_base_name": "",
                         "provision_table_name": "",
@@ -376,11 +357,12 @@ def test_doctor_is_redacted_and_resumable(monkeypatch: pytest.MonkeyPatch, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     rendered = json.dumps(payload)
-    assert "cookie-secret" not in rendered
-    assert "token-secret" not in rendered
-    assert payload["data"]["setup_stage"] == "wechat_unverified"
-    assert payload["next_action"] == "run_online_doctor"
-    assert payload["data"]["progress"]["current_step"] == "wechat_validation"
+    assert "redfox-key-secret" not in rendered
+    # With the redfox key configured, the next blocking step is the search
+    # window; there is no wechat credential stage anymore.
+    assert payload["data"]["setup_stage"] == "search_window_unconfirmed"
+    assert payload["next_action"] == "ask_user_for_search_window"
+    assert payload["data"]["progress"]["current_step"] == "search_window"
     assert payload["data"]["progress"]["next_action_label"]
 
 
@@ -406,7 +388,7 @@ def test_user_status_is_compact_and_actionable(monkeypatch: pytest.MonkeyPatch, 
     assert payload["data"]["progress"]["percent"] > 0
 
 
-def test_doctor_pauses_for_unconfirmed_search_window(
+def test_doctor_advances_past_redfox_to_feishu_destination(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
@@ -414,7 +396,7 @@ def test_doctor_pauses_for_unconfirmed_search_window(
 
     configured()
     config = load_config()
-    config["health"]["wechat"]["last_verified_at"] = "2026-01-01T00:00:00+00:00"
+    config["setup"]["search_window_confirmed"] = True
     save_config(config)
     monkeypatch.setattr(
         manage,
@@ -423,36 +405,12 @@ def test_doctor_pauses_for_unconfirmed_search_window(
     )
     assert manage.main(["doctor"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["setup_stage"] == "search_window_unconfirmed"
-    assert payload["next_action"] == "ask_user_for_search_window"
+    assert payload["data"]["setup_stage"] == "feishu_destination_unconfirmed"
+    assert payload["next_action"] == "ask_user_for_feishu_destination"
 
 
-def test_recent_wechat_failure_overrides_stale_success(
-    monkeypatch: pytest.MonkeyPatch, capsys
-):
-    import manage
-    from config_store import load_config, save_config
-
-    configured()
-    config = load_config()
-    config["health"]["wechat"].update(
-        {
-            "last_verified_at": "2026-01-01T00:00:00+00:00",
-            "last_failure_kind": "WeChatCookieExpired",
-            "consecutive_failures": 1,
-        }
-    )
-    save_config(config)
-    monkeypatch.setattr(
-        manage,
-        "lark_cli_info",
-        lambda: {"compatible": True, "version": "1.0.69"},
-    )
-    assert manage.main(["status"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["setup_stage"] == "wechat_credentials_expired"
-    assert payload["data"]["progress"]["current_step"] == "wechat_validation"
-    assert payload["data"]["progress"]["percent"] < 100
+# test_recent_wechat_failure_overrides_stale_success removed: wechat health
+# tracking was deleted together with the direct-connection data source.
 
 
 def test_recent_feishu_failure_overrides_stale_success():
@@ -471,7 +429,6 @@ def test_recent_feishu_failure_overrides_stale_success():
         }
     )
     config["subscriptions"][0]["biz"] = "biz"
-    config["health"]["wechat"]["last_verified_at"] = "2026-01-01T00:00:00+00:00"
     config["feishu"].update(
         {
             "destination": "existing",
@@ -519,8 +476,6 @@ def test_execution_policy_previews_once_then_persists(capsys):
         "set",
         "--mode",
         "autopilot",
-        "--unlisted-publisher",
-        "ingest_once",
         "--feishu-provisioning",
         "deny",
         "--feishu-sync",
@@ -538,7 +493,6 @@ def test_execution_policy_previews_once_then_persists(capsys):
     assert saved["data"]["additional_routine_confirmations_required"] is False
     assert policy["confirmed"] is True
     assert policy["mode"] == "autopilot"
-    assert policy["unlisted_publisher"] == "ingest_once"
     assert policy["approved_at"]
 
 
@@ -552,8 +506,6 @@ def test_execution_policy_rejects_undecided_feishu_destination(capsys):
             "set",
             "--mode",
             "autopilot",
-            "--unlisted-publisher",
-            "ask",
             "--feishu-provisioning",
             "deny",
             "--feishu-sync",
@@ -607,7 +559,6 @@ def test_execution_policy_partial_patch_preserves_omitted_fields(
         {
             "confirmed": True,
             "mode": "autopilot",
-            "unlisted_publisher": "ingest_once",
             "allow_feishu_sync": True,
             "approved_at": "2026-01-01T00:00:00+00:00",
         }
@@ -627,7 +578,6 @@ def test_execution_policy_partial_patch_preserves_omitted_fields(
     capsys.readouterr()
     saved = load_config()["setup"]["execution_policy"]
     assert saved["confirmed"] is True
-    assert saved["unlisted_publisher"] == "ingest_once"
     assert saved["allow_feishu_sync"] is True
     assert saved["approved_at"] == "2026-02-01T00:00:00+00:00"
 
@@ -759,7 +709,6 @@ def test_feishu_identity_change_invalidates_execution_policy(capsys):
         {
             "confirmed": True,
             "mode": "autopilot",
-            "unlisted_publisher": "ingest_once",
             "approved_at": "2026-01-01T00:00:00+00:00",
         }
     )
@@ -1199,7 +1148,6 @@ def test_feishu_create_base_uses_matching_persisted_policy_without_yes(
         {
             "confirmed": True,
             "mode": "autopilot",
-            "unlisted_publisher": "ask",
             "allow_feishu_provisioning": True,
             "provision_base_name": "公众号文章",
             "provision_table_name": "文章列表",
@@ -1357,7 +1305,7 @@ def test_bulk_add_subscriptions_is_atomic_and_deduplicated(tmp_path: Path, capsy
     preview = json.loads(capsys.readouterr().out)
     assert preview["data"]["added_count"] == 2
     assert preview["next_action"] == "review_and_apply_subscription_batch"
-    assert load_config()["subscriptions"] == [{"name": "Example"}]
+    assert load_config()["subscriptions"] == [{"name": "Example", "alias": "example"}]
     assert manage.main(["subscriptions", "bulk-add", "--file", str(source)]) == 0
     saved = load_config()["subscriptions"]
     assert [item["name"] for item in saved] == ["Example", "Second", "Third"]
@@ -1405,12 +1353,12 @@ def test_reset_previews_then_clears_credentials(capsys):
     assert manage.main(["reset", "--scope", "credentials"]) == 0
     preview = json.loads(capsys.readouterr().out)
     assert preview["next_action"] == "rerun_with_yes"
-    assert load_config()["wechat"]["cookie"] == "cookie-secret"
+    assert load_config()["redfox"]["api_key"] == "redfox-key-secret"
     assert manage.main(["reset", "--scope", "credentials", "--yes"]) == 0
     capsys.readouterr()
     saved = load_config()
-    assert saved["wechat"] == {"cookie": "", "token": ""}
-    assert saved["subscriptions"] == [{"name": "Example"}]
+    assert saved["redfox"] == {"api_key": ""}
+    assert saved["subscriptions"] == [{"name": "Example", "alias": "example"}]
 
 
 def test_all_data_reset_removes_ephemeral_artifacts_and_preserves_runtime(capsys):
@@ -1481,32 +1429,9 @@ def test_all_data_reset_removes_ephemeral_artifacts_and_preserves_runtime(capsys
     assert unrelated.read_text(encoding="utf-8") == "keep me\n"
 
 
-def test_subscription_resolution_reports_ambiguity_without_guessing():
-    from discover_only import resolve_subscriptions
-
-    config = configured()
-
-    class API:
-        def search_account(self, query, count=5):
-            return [
-                {"nickname": "Example A", "alias": "example", "fakeid": "biz-a"},
-                {"nickname": "Example B", "alias": "example", "fakeid": "biz-b"},
-            ]
-
-    config["subscriptions"] = [{"alias": "example"}]
-    result = resolve_subscriptions(config, api=API(), save=False)
-    assert result[0]["status"] == "ambiguous"
-    assert "biz" not in config["subscriptions"][0]
-
-
-def test_subscription_resolution_matches_aliases_and_biz_consistently():
-    from subscription_resolution import matches_subscription
-
-    subscriptions = [{"name": "Example Account", "alias": "Example", "biz": "Biz_123"}]
-
-    assert matches_subscription(subscriptions, "  example  ", "") is True
-    assert matches_subscription(subscriptions, "Different publisher", "biz_123") is True
-    assert matches_subscription(subscriptions, "Different publisher", "biz_456") is False
+# test_subscription_resolution_reports_ambiguity_without_guessing removed:
+# discover_only.resolve_subscriptions (WeChat account search) was deleted with
+# the direct-connection data source.
 
 
 def test_process_json_failure_is_structured(capsys):
@@ -1527,111 +1452,9 @@ def _direct_article(account: str = "New Account") -> dict:
         "update_time": 1_700_000_000,
         "link": "https://mp.weixin.qq.com/s/direct",
         "text": "Untrusted body",
+        "content": "Untrusted body",
+        "content_source": "direct",
     }
-
-
-def test_ingest_unlisted_publisher_requires_question_before_mutation(
-    monkeypatch: pytest.MonkeyPatch, capsys
-):
-    import process_pending
-    from config_store import load_config
-    from queue_helpers import get_pending
-
-    configured()
-    monkeypatch.setattr(process_pending, "fetch_article", lambda url: _direct_article())
-    assert process_pending.main(
-        ["--format", "json", "ingest", "--url", _direct_article()["link"]]
-    ) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["error"]["code"] == "SUBSCRIPTION_CONFIRMATION_REQUIRED"
-    assert payload["error"]["details"]["account"] == "New Account"
-    assert get_pending() == []
-    assert load_config()["subscriptions"] == [{"name": "Example"}]
-
-
-def test_ingest_adds_subscription_only_after_explicit_consent(
-    monkeypatch: pytest.MonkeyPatch, capsys
-):
-    import process_pending
-    from config_store import load_config
-    from queue_helpers import get_pending
-
-    configured()
-    monkeypatch.setattr(process_pending, "fetch_article", lambda url: _direct_article())
-    assert process_pending.main(
-        [
-            "--format",
-            "json",
-            "ingest",
-            "--url",
-            _direct_article()["link"],
-            "--subscribe",
-        ]
-    ) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["queued"] is True
-    assert payload["data"]["publisher"]["subscription_added"] is True
-    assert load_config()["subscriptions"][-1] == {
-        "name": "New Account",
-        "biz": "biz-direct",
-    }
-    assert get_pending()[0]["account"] == "New Account"
-    assert "text" not in get_pending()[0]
-
-
-def test_ingest_once_does_not_change_subscriptions(
-    monkeypatch: pytest.MonkeyPatch, capsys
-):
-    import process_pending
-    from config_store import load_config
-    from queue_helpers import get_pending
-
-    configured()
-    monkeypatch.setattr(process_pending, "fetch_article", lambda url: _direct_article())
-    assert process_pending.main(
-        [
-            "--format",
-            "json",
-            "ingest",
-            "--url",
-            _direct_article()["link"],
-            "--no-subscribe",
-        ]
-    ) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["publisher"]["subscribed"] is False
-    assert load_config()["subscriptions"] == [{"name": "Example"}]
-    assert len(get_pending()) == 1
-
-
-def test_ingest_uses_persisted_unlisted_publisher_policy(
-    monkeypatch: pytest.MonkeyPatch, capsys
-):
-    import process_pending
-    from config_store import load_config, save_config
-
-    config = configured()
-    config["feishu"]["destination"] = "skip"
-    config["setup"]["execution_policy"].update(
-        {
-            "confirmed": True,
-            "mode": "autopilot",
-            "unlisted_publisher": "auto_subscribe",
-            "approved_at": "2026-01-01T00:00:00+00:00",
-        }
-    )
-    save_config(config)
-    monkeypatch.setattr(process_pending, "fetch_article", lambda url: _direct_article())
-    assert process_pending.main(
-        ["--format", "json", "ingest", "--url", _direct_article()["link"]]
-    ) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["publisher"]["subscription_added"] is True
-    assert (
-        payload["data"]["publisher"]["decision_source"]
-        == "persisted_execution_policy"
-    )
-    assert load_config()["subscriptions"][-1]["name"] == "New Account"
 
 
 def test_done_uses_persisted_feishu_sync_policy(
@@ -1646,7 +1469,6 @@ def test_done_uses_persisted_feishu_sync_policy(
         {
             "confirmed": True,
             "mode": "autopilot",
-            "unlisted_publisher": "ask",
             "allow_feishu_sync": True,
             "approved_at": "2026-01-01T00:00:00+00:00",
         }
@@ -1684,44 +1506,6 @@ def test_done_uses_persisted_feishu_sync_policy(
     ) == 0
     capsys.readouterr()
     assert synced == [document["link"]]
-
-
-def test_ingest_unknown_publisher_requests_name_and_choice(
-    monkeypatch: pytest.MonkeyPatch, capsys
-):
-    import process_pending
-
-    configured()
-    monkeypatch.setattr(
-        process_pending,
-        "fetch_article",
-        lambda url: {**_direct_article(""), "account_id": ""},
-    )
-    assert process_pending.main(
-        ["--format", "json", "ingest", "--url", _direct_article()["link"]]
-    ) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["error"]["code"] == "ARTICLE_PUBLISHER_UNKNOWN"
-
-
-def test_ingest_existing_subscription_is_immediate_and_idempotent(
-    monkeypatch: pytest.MonkeyPatch, capsys
-):
-    import process_pending
-    from queue_helpers import get_pending
-
-    configured()
-    document = _direct_article("Example")
-    document["account_id"] = ""
-    monkeypatch.setattr(process_pending, "fetch_article", lambda url: document)
-    command = ["--format", "json", "ingest", "--url", document["link"]]
-    assert process_pending.main(command) == 0
-    first = json.loads(capsys.readouterr().out)
-    assert first["data"]["status"] == "queued"
-    assert process_pending.main(command) == 0
-    second = json.loads(capsys.readouterr().out)
-    assert second["data"]["status"] == "already_known"
-    assert len(get_pending()) == 1
 
 
 def test_lark_cli_version_range_is_reported(monkeypatch: pytest.MonkeyPatch):
@@ -2005,7 +1789,7 @@ def test_lark_runtime_ignores_dangerous_config_override(tmp_path: Path, monkeypa
 
 def test_safe_lark_arguments_pins_profile_and_blocks_profile_mutation(capsys):
     import lark_runtime
-    from config_store import load_config, save_config
+    from config_store import save_config
 
     config = configured()
     config["feishu"]["expected_app_id"] = "cli_example123"

@@ -1,14 +1,13 @@
 # Operations and recovery
 
-Use the management command as the first diagnostic boundary. It emits a stable JSON envelope and never returns Cookie, token, Base token, or table ID.
+Use the management command as the first diagnostic boundary. It emits a stable JSON envelope and never returns the redfox API key, Base token, or table ID.
 
-For discovery, `WECHAT_ACCESS_RESTRICTED` means an authenticated endpoint rejected
-the request (for example HTTP 403). `WECHAT_TOKEN_EXPIRED`,
-`WECHAT_COOKIE_EXPIRED`, `WECHAT_CREDENTIAL_CONTEXT_INVALID`, and
-`WECHAT_RATE_LIMITED` use the same safe JSON detail contract: operation name plus
-HTTP status, numeric API return code, or response type. Details never contain a
-Cookie, token, URL, or response body. Access restriction is not retried
-automatically and does not imply that a Cookie has expired.
+For discovery, `REDFOX_AUTH` means the API key was rejected (re-enter it with
+`manage redfox-set-key`), `REDFOX_RATE_LIMITED` and `REDFOX_TRANSIENT` are the
+only retryable failures, and `REDFOX_API_ERROR` carries the upstream API code in
+its safe detail contract (operation name plus HTTP status or numeric API code,
+never the key or response body). Rate limits back off; auth failures are never
+retried.
 
 ```text
 bash scripts/run.sh manage doctor
@@ -29,13 +28,13 @@ Use one policy confirmation to replace repeated routine prompts:
 
 ```text
 manage execution-policy show
-manage execution-policy set --mode autopilot --unlisted-publisher <ask|ingest_once|auto_subscribe> --feishu-provisioning <allow|deny> --feishu-sync <allow|deny> [--base-name <BASE> --table-name <TABLE>]
+manage execution-policy set --mode autopilot --feishu-provisioning <allow|deny> --feishu-sync <allow|deny> [--base-name <BASE> --table-name <TABLE>]
 # after the user approves the complete preview
 manage execution-policy set <SAME_ARGUMENTS> --yes
 ```
 
 Provisioning `allow` requires exact Base and table names. A confirmed autopilot
-policy covers routine discovery/read/score/queue/export, its selected unlisted
+policy covers routine discovery/read/score/queue/export, its selected Feishu
 publisher behavior, exact-name standard Base provisioning, and qualified writes to
 the unchanged configured target. Provisioning approval is consumed after one
 successful creation so retries cannot silently create duplicates. It never covers
@@ -49,7 +48,6 @@ last; those changes invalidate an earlier confirmation.
 The Agent may patch one section without asking the user to repeat unrelated values:
 
 ```text
-setup --agent-stdin --section wechat
 setup --agent-stdin --section subscriptions
 setup --agent-stdin --section settings
 setup --agent-stdin --section preferences
@@ -58,6 +56,25 @@ setup --agent-stdin --section execution_policy
 ```
 
 Accepted settings include `check_hours`, `request_delay`, `max_articles_per_account`, `content_dedup`, `min_score`, and `output_language` (`auto`, `zh`, or `en`). Ask for preferences in dialogue; do not require users to edit JSON.
+
+## Article data source (redfox)
+
+Articles come from the paid `redfox.hk` API; the former WeChat cookie/token discovery path has been removed. Setup:
+
+```text
+cat | manage redfox-set-key   # paste the key, Ctrl-D; avoids shell history
+# scripted: printf %s '<API_KEY>' | manage redfox-set-key
+manage redfox-status            # no network by default
+manage redfox-status --verify   # one paid probe call
+manage doctor --online          # full online check
+```
+
+Notes and limits:
+
+- The redfox API key is stored under `redfox.api_key` (0600 stdin baseline) and never appears in output beyond its last four characters.
+- Discovery is billing-aware: a per-subscription cooldown skips paid calls within the configured `check_hours` interval, and pagination stops as soon as an article older than the lookback window appears.
+- Articles cache their body in the queue (`content`/`content_source`); processing reads the cached body only. An entry without a cached body cannot be read — re-run discover or dismiss it.
+- Data comes from the redfox wide library (广域库): freshest coverage, newest-first ordering. Accounts are identified by wechat alias — subscriptions without an alias are reported as unresolved.
 
 Subscription maintenance is local and explicit:
 
@@ -138,32 +155,6 @@ The result includes selection reasons and exclusion counts. It explicitly report
 that content was not fetched, articles were not completed, and Feishu was not
 written. The Agent must still read untrusted article content, apply all five score
 dimensions, and request any required external-write authorization.
-
-## Direct-link ingestion
-
-```text
-process --format json ingest --url <WECHAT_URL>
-```
-
-The command safely extracts the article title, publisher, publication time, digest,
-and bounded body. It does not place the body in the queue. A confirmed autopilot
-policy applies `auto_subscribe` or `ingest_once` automatically. If the saved rule is
-`ask` (or no policy is confirmed), it returns
-`SUBSCRIPTION_CONFIRMATION_REQUIRED` before changing either config or queue. Ask the
-user, then run exactly one:
-
-```text
-process --format json ingest --url <WECHAT_URL> --subscribe
-process --format json ingest --url <WECHAT_URL> --no-subscribe
-```
-
-When page metadata has no publisher, collect the name from the user and add
-`--account <NAME>`. `--subscribe` is current-command authorization to modify the
-local subscription list; never use it speculatively. Automatic subscription must
-come from the persisted policy. `--no-subscribe` queues the article once. Repeated
-ingestion is URL-idempotent.
-
-After ingestion, use the existing `read` and `done` workflow. For an explicit user request to write this individual article regardless of its score, combine `--feishu --force-feishu`. `--force-feishu` is invalid without `--feishu` and does not change the saved score threshold.
 
 ## Safe disable and reset
 

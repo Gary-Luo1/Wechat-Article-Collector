@@ -64,19 +64,6 @@ def test_queue_summary_empty():
     }
 
 
-def test_known_urls_returns_pending_and_processed_identities():
-    from article_inbox import known_urls
-    from queue_helpers import add_pending, complete_article
-
-    add_pending([article("a"), article("b")])
-    complete_article("https://mp.weixin.qq.com/s/a", {"disposition": "completed"})
-
-    assert known_urls() == {
-        "https://mp.weixin.qq.com/s/a",
-        "https://mp.weixin.qq.com/s/b",
-    }
-
-
 def test_doctor_queue_block_uses_same_summary():
     import manage
     from article_inbox import queue_summary
@@ -85,7 +72,7 @@ def test_doctor_queue_block_uses_same_summary():
 
     config = json.loads(json.dumps(DEFAULT_CONFIG))
     config["wechat"] = {"cookie": "c", "token": "t"}
-    config["subscriptions"] = [{"name": "Example"}]
+    config["subscriptions"] = [{"name": "Example", "alias": "example"}]
     save_config(config)
 
     add_pending([article("a"), article("b"), article("c")])
@@ -93,7 +80,7 @@ def test_doctor_queue_block_uses_same_summary():
     update_inbox_item("https://mp.weixin.qq.com/s/b", state="later")
     complete_article("https://mp.weixin.qq.com/s/c", {"disposition": "completed"})
 
-    report, _ = manage._doctor(online=False, save_resolved=False)
+    report, _ = manage._doctor(online=False)
     summary = queue_summary()
     assert report["queue"] == {
         "total": summary["pending"] + summary["processed"],

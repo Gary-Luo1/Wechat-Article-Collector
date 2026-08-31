@@ -13,7 +13,7 @@ from paths import config_path, data_dir, secure_write_json
 from process_lock import process_lock
 
 
-CONFIG_VERSION = 10
+CONFIG_VERSION = 11
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": CONFIG_VERSION,
     "setup": {
@@ -29,7 +29,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "execution_policy": {
             "confirmed": False,
             "mode": "guided",
-            "unlisted_publisher": "ask",
             "allow_feishu_provisioning": False,
             "provision_base_name": "",
             "provision_table_name": "",
@@ -38,7 +37,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "scope_version": 1,
         },
     },
-    "wechat": {"cookie": "", "token": ""},
     "subscriptions": [],
     "feishu": {
         "destination": "undecided",
@@ -69,6 +67,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "min_score": 6.0,
         "output_language": "auto",
     },
+    "redfox": {"api_key": ""},
     "preferences": {
         "include_topics": [],
         "exclude_keywords": [],
@@ -77,11 +76,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "digest_limit": 5,
     },
     "health": {
-        "wechat": {
-            "last_verified_at": "",
-            "last_failure_kind": "",
-            "consecutive_failures": 0,
-        },
         "subscriptions": {"last_verified_at": "", "unresolved": 0},
         "feishu": {
             "last_verified_at": "",
@@ -128,9 +122,13 @@ LEGACY_FIELD_MAPPING = {
 def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(DEFAULT_CONFIG)
     merged["version"] = raw.get("version", 1)
-    for section in ("wechat", "feishu", "settings", "preferences"):
+    for section in ("feishu", "settings", "preferences", "redfox"):
         value = raw.get(section, {})
         if isinstance(value, dict):
+            if section == "settings":
+                # Drop keys removed by schema changes (e.g. article_source)
+                # instead of carrying them forward forever.
+                value = {k: v for k, v in value.items() if k in merged[section]}
             merged[section].update(value)
     raw_setup = raw.get("setup", {})
     if isinstance(raw_setup, dict):
@@ -141,7 +139,9 @@ def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
         for key in nested_setup:
             raw_value = raw_setup.get(key)
             if isinstance(raw_value, dict):
-                merged["setup"][key].update(raw_value)
+                known = merged["setup"][key]
+                raw_value = {k: v for k, v in raw_value.items() if k in known}
+                known.update(raw_value)
             elif key in raw_setup:
                 merged["setup"][key] = raw_value
     if "subscriptions" in raw:
@@ -191,10 +191,10 @@ def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
 def _validate_health(health: Any) -> None:
     if not isinstance(health, dict):
         raise ConfigError("health must be an object")
-    for section in ("wechat", "subscriptions", "feishu"):
+    for section in ("subscriptions", "feishu"):
         if not isinstance(health.get(section), dict):
             raise ConfigError(f"health.{section} must be an object")
-    for section in ("wechat", "feishu"):
+    for section in ("feishu",):
         value = health[section]
         for key in ("last_verified_at", "last_failure_kind"):
             if not isinstance(value.get(key), str):
@@ -289,7 +289,7 @@ def _validate_feishu(feishu: Any) -> None:
     # boundary and requires resolvable title/url fields before any write.
 
 
-def validate_config(config: dict[str, Any], *, require_wechat: bool = False) -> dict[str, Any]:
+def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ConfigError("config must be a JSON object")
     config = _merge_defaults(config)
@@ -336,15 +336,6 @@ def validate_config(config: dict[str, Any], *, require_wechat: bool = False) -> 
         raise ConfigError("setup.execution_policy.confirmed must be boolean")
     if execution_policy.get("mode") not in {"guided", "autopilot"}:
         raise ConfigError("setup.execution_policy.mode must be guided or autopilot")
-    if execution_policy.get("unlisted_publisher") not in {
-        "ask",
-        "ingest_once",
-        "auto_subscribe",
-    }:
-        raise ConfigError(
-            "setup.execution_policy.unlisted_publisher must be ask, ingest_once, "
-            "or auto_subscribe"
-        )
     for key in ("allow_feishu_provisioning", "allow_feishu_sync"):
         if not isinstance(execution_policy.get(key), bool):
             raise ConfigError(f"setup.execution_policy.{key} must be boolean")
@@ -357,8 +348,7 @@ def validate_config(config: dict[str, Any], *, require_wechat: bool = False) -> 
     if scope_version != 1:
         raise ConfigError("setup.execution_policy.scope_version is unsupported")
     if execution_policy["mode"] == "guided" and (
-        execution_policy["unlisted_publisher"] != "ask"
-        or execution_policy["allow_feishu_provisioning"]
+        execution_policy["allow_feishu_provisioning"]
         or execution_policy["allow_feishu_sync"]
     ):
         raise ConfigError(
@@ -379,11 +369,6 @@ def validate_config(config: dict[str, Any], *, require_wechat: bool = False) -> 
         raise ConfigError(
             "Feishu provisioning names require allow_feishu_provisioning=true"
         )
-    wechat = config["wechat"]
-    if not isinstance(wechat.get("cookie"), str) or not isinstance(wechat.get("token"), str):
-        raise ConfigError("wechat.cookie and wechat.token must be strings")
-    if require_wechat and (not wechat["cookie"].strip() or not wechat["token"].strip()):
-        raise ConfigError("WeChat cookie/token are missing; run setup locally")
     subscriptions = config["subscriptions"]
     if not isinstance(subscriptions, list):
         raise ConfigError("subscriptions must be a list")
@@ -409,6 +394,9 @@ def validate_config(config: dict[str, Any], *, require_wechat: bool = False) -> 
         raise ConfigError("settings.content_dedup must be boolean")
     if settings.get("output_language") not in {"auto", "zh", "en"}:
         raise ConfigError("settings.output_language must be auto, zh, or en")
+    redfox = config["redfox"]
+    if not isinstance(redfox.get("api_key"), str):
+        raise ConfigError("redfox.api_key must be a string")
     preferences = config["preferences"]
     if not isinstance(preferences, dict):
         raise ConfigError("preferences must be an object")
@@ -446,7 +434,7 @@ def validate_config(config: dict[str, Any], *, require_wechat: bool = False) -> 
     return config
 
 
-def load_config(path: Path | None = None, *, require_wechat: bool = False) -> dict[str, Any]:
+def load_config(path: Path | None = None) -> dict[str, Any]:
     target = Path(path) if path else config_path()
     try:
         raw = json.loads(target.read_text(encoding="utf-8-sig"))
@@ -454,7 +442,7 @@ def load_config(path: Path | None = None, *, require_wechat: bool = False) -> di
         raise ConfigError(f"configuration not found at {target}; run setup locally") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigError(f"cannot read configuration at {target}: {exc}") from exc
-    return validate_config(raw, require_wechat=require_wechat)
+    return validate_config(raw)
 
 
 def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
@@ -508,7 +496,7 @@ def update_health(
     path: Path | None = None,
     unresolved: int | None = None,
 ) -> dict[str, Any]:
-    if section not in {"wechat", "subscriptions", "feishu"}:
+    if section not in {"subscriptions", "feishu"}:
         raise ConfigError(f"unsupported health section: {section}")
     now = datetime.now(timezone.utc).isoformat()
 
@@ -535,13 +523,10 @@ def redacted_config(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": validated["version"],
         "setup": deepcopy(validated["setup"]),
-        "wechat": {
-            "configured": bool(
-                validated["wechat"]["cookie"].strip()
-                and validated["wechat"]["token"].strip()
-            )
-        },
         "subscriptions": deepcopy(validated["subscriptions"]),
+        "redfox": {
+            "configured": bool(validated["redfox"]["api_key"].strip()),
+        },
         "feishu": {
             "destination": validated["feishu"]["destination"],
             "enabled": validated["feishu"]["enabled"],

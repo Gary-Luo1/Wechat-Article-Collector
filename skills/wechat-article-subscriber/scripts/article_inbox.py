@@ -96,13 +96,6 @@ def queue_summary() -> dict[str, Any]:
     return _queue_summary(read_queue())
 
 
-def known_urls() -> set[str]:
-    """Return every article URL identity currently in the queue."""
-    queue = read_queue()
-    return {item["normalized_url"] for item in queue["pending"]} | set(
-        queue["processed"]
-    )
-
 
 def query_inbox(
     *,

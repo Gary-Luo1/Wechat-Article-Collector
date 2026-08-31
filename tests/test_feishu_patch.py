@@ -25,7 +25,6 @@ def _configured(monkeypatch, home) -> None:
         {
             "confirmed": True,
             "mode": "autopilot",
-            "unlisted_publisher": "ask",
             "allow_feishu_sync": True,
             "approved_at": "2026-01-01T00:00:00+00:00",
         }

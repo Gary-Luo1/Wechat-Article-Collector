@@ -32,8 +32,7 @@ from protocol import dump, failure, success
 
 MAX_AGENT_INPUT_BYTES = 256 * 1024
 AGENT_INPUT_KEYS = {
-    "wechat_cookie",
-    "wechat_token",
+    "redfox_api_key",
     "subscriptions",
     "feishu_base_token",
     "feishu_table_id",
@@ -58,14 +57,6 @@ FEISHU_INPUT_KEYS = {
     "schema_policy",
     "field_mapping",
 }
-RECOMMENDED_COOKIE_KEYS = {"rand_info", "slave_bizuin"}
-SESSION_COOKIE_KEYS = {
-    "bizuin",
-    "data_bizuin",
-    "data_ticket",
-    "slave_sid",
-    "slave_user",
-}
 SETTINGS_INPUT_KEYS = {
     "check_hours",
     "request_delay",
@@ -84,7 +75,6 @@ PREFERENCES_INPUT_KEYS = {
 EXECUTION_POLICY_INPUT_KEYS = {
     "confirmed",
     "mode",
-    "unlisted_publisher",
     "allow_feishu_provisioning",
     "provision_base_name",
     "provision_table_name",
@@ -92,72 +82,6 @@ EXECUTION_POLICY_INPUT_KEYS = {
     "approved_at",
     "scope_version",
 }
-
-
-def _required_string(payload: dict[str, Any], key: str) -> str:
-    value = payload.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise ConfigError(f"{key} must be a non-empty string")
-    return value.strip()
-
-
-def normalize_cookie(raw: str) -> str:
-    """Normalize common DevTools exports into a canonical ``name=value`` Cookie.
-
-    Accepts rows separated by ``;`` or newlines, and per-pair separators of
-    ``=``, a tab, or ``: `` (the clipboard table layout of DevTools Storage).
-    Duplicate names keep their first value; malformed rows are dropped. When no
-    valid pair can be parsed at all (for example a plain value or a synthetic
-    test payload), the original value is preserved unchanged.
-    """
-    text = str(raw).strip()
-    if not text:
-        return text
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for line in text.replace("\r", "\n").split("\n"):
-        for part in line.split(";"):
-            token = part.strip()
-            if not token:
-                continue
-            if token.casefold().startswith("cookie:"):
-                token = token[len("cookie:") :].strip()
-                if not token:
-                    continue
-            name, value = "", ""
-            for separator in ("=", "\t", ": "):
-                if separator in token:
-                    name, value = token.split(separator, 1)
-                    break
-            name = name.strip()
-            value = value.strip().strip('"').strip("'")
-            if not name or not value:
-                continue
-            if name.casefold() in seen:
-                continue
-            seen.add(name.casefold())
-            normalized.append(f"{name}={value}")
-    if not normalized:
-        return text
-    return "; ".join(normalized)
-
-
-def _is_masked_token(token: str) -> bool:
-    stripped = token.strip()
-    lowered = stripped.casefold()
-    return (
-        lowered
-        in {
-            "***",
-            "****",
-            "*****",
-            "<redacted>",
-            "redacted",
-            "[redacted]",
-            "masked",
-        }
-        or bool(stripped and set(stripped) == {"*"})
-    )
 
 
 def _optional_string(payload: dict[str, Any], key: str) -> str:
@@ -205,56 +129,12 @@ def _reset_health(config: dict[str, Any], section: str) -> None:
     config["health"][section] = deepcopy(DEFAULT_CONFIG["health"][section])
 
 
-def _cookie_names(cookie: str) -> set[str]:
-    names: set[str] = set()
-    for part in cookie.split(";"):
-        name, separator, _ = part.partition("=")
-        if separator and name.strip():
-            names.add(name.strip())
-    return names
-
-
-def _warn_credential_shape(cookie: str, token: str) -> None:
-    missing = sorted(RECOMMENDED_COOKIE_KEYS - _cookie_names(cookie))
-    if missing:
-        logging.warning(
-            "WeChat Cookie is missing commonly required keys (%s). Copy the complete "
-            "Cookie set from developer tools > Application > Storage > Cookies > "
-            "https://mp.weixin.qq.com/.",
-            ", ".join(missing),
-        )
-    if _is_masked_token(token):
-        logging.warning(
-            "WeChat token looks masked or redacted (e.g. ***). Chat retention can "
-            "hide the value; send the raw numeric token again so the real value is "
-            "written to the local config."
-        )
-    elif not token.isdigit():
-        logging.warning(
-            "WeChat token has an unexpected shape. After signing in at "
-            "https://mp.weixin.qq.com/, copy the numeric token query parameter from "
-            "the current Official Accounts Platform page URL, not /wxamp/."
-        )
-
-
-def credential_shape(cookie: str, token: str) -> dict[str, Any]:
-    """Return a value-free diagnostic safe to include in Agent output."""
-    names = _cookie_names(cookie)
-    return {
-        "complete_cookie_requested": True,
-        "missing_diagnostic_keys": sorted(RECOMMENDED_COOKIE_KEYS - names),
-        "present_session_key_names": sorted(SESSION_COOKIE_KEYS & names),
-        "token_masked": _is_masked_token(token),
-        "token_is_numeric": token.isdigit(),
-        "values_echoed": False,
-    }
-
 
 def local_config_template() -> dict[str, Any]:
     """Return the smallest directly editable configuration document."""
     return {
         "version": DEFAULT_CONFIG["version"],
-        "wechat": {"cookie": "", "token": ""},
+        "redfox": {"api_key": ""},
         "subscriptions": [],
         "feishu": {
             "destination": "undecided",
@@ -269,13 +149,9 @@ def local_config_template() -> dict[str, Any]:
 
 
 def _local_config_readiness(config: dict[str, Any]) -> dict[str, Any]:
-    cookie = str(config["wechat"].get("cookie") or "")
-    token = str(config["wechat"].get("token") or "")
     missing: list[str] = []
-    if not cookie.strip():
-        missing.append("wechat.cookie")
-    if not token.strip():
-        missing.append("wechat.token")
+    if not config["redfox"]["api_key"].strip():
+        missing.append("redfox.api_key")
     if not config["subscriptions"]:
         missing.append("subscriptions")
     if not config["setup"]["search_window_confirmed"]:
@@ -293,8 +169,6 @@ def _local_config_readiness(config: dict[str, Any]) -> dict[str, Any]:
         "feishu_destination": config["feishu"]["destination"],
         "execution_policy_confirmed": config["setup"]["execution_policy"]["confirmed"],
     }
-    if cookie.strip() and token.strip():
-        result["wechat_credential_check"] = credential_shape(cookie, token)
     return result
 
 
@@ -407,10 +281,15 @@ def setup_guide() -> dict[str, Any]:
                 "but does not remove the original chat message or prevent platform retention"
             ),
             "ordinary_chat": (
-                "send Cookie and token one at a time after acknowledging that chat may "
-                "be retained; the Agent writes the configuration without echoing values. "
-                "If a credential is posted in chat, treat that submission as exposure to "
+                "send the redfox API key once after acknowledging that chat may "
+                "be retained; the Agent writes the configuration without echoing the value. "
+                "If the key is posted in chat, treat that submission as exposure to "
                 "the chat platform even when the Agent never repeats it"
+            ),
+            "stdin_command": (
+                "printf is shell-history-safe only inside scripts; in an interactive "
+                "shell prefer `cat | manage redfox-set-key` so the key never lands in "
+                "command history"
             ),
             "self_edit": f"edit the local configuration file at {target}",
             "local_hidden_prompt": "run setup locally and enter values at the hidden prompts",
@@ -425,47 +304,35 @@ def setup_guide() -> dict[str, Any]:
                 "do not sync, upload, commit, or share it"
             ),
             "required_fields": {
-                "wechat.cookie": (
-                    "all mp.weixin.qq.com cookies copied from developer tools > "
-                    "Application > Storage > Cookies and joined as name=value; name=value"
+                "redfox.api_key": (
+                    "redfox.hk API key; preferred input channel is "
+                    "`printf %s '<KEY>' | manage redfox-set-key`"
                 ),
-                "wechat.token": "numeric token from the current authenticated page URL",
-                "subscriptions": "one or more exact account names or aliases",
+                "subscriptions": "account entries; each needs the WeChat alias (微信号) — the data source queries by alias only",
                 "settings.check_hours": "lookback window in hours; 24 is recommended",
                 "feishu.destination": (
                     "required explicit choice: skip, map an existing Base, or create a Base; "
                     "undecided is never treated as skip"
                 ),
                 "setup.execution_policy": (
-                    "one-time bounded approval for routine work, unlisted publishers, "
+                    "one-time bounded approval for routine work, "
                     "optional Feishu provisioning, and optional Feishu sync"
                 ),
             },
             "minimal_template": local_config_template(),
-            "subscription_item_example": {"name": "<EXACT_ACCOUNT_NAME>"},
+            "subscription_item_example": {"name": "<EXACT_ACCOUNT_NAME>", "alias": "<WECHAT_ALIAS_REQUIRED>"},
             "prepare_command": "setup --prepare-local-file --format json",
             "open_command": "setup --open-local-file --format json",
             "validate_command": "setup --validate-local-file --format json",
         },
-        "wechat_credentials": {
-            "login_url": "https://mp.weixin.qq.com/",
+        "redfox_credentials": {
+            "signup_url": "https://redfox.hk/",
             "steps": [
-                "Sign in to the Official Accounts Platform at the login URL.",
-                "Open browser developer tools and choose Application.",
-                "Open Storage > Cookies > https://mp.weixin.qq.com/.",
-                "Copy every cookie row and join them as name=value; name=value.",
-                "Copy the numeric token query parameter from the current authenticated page URL.",
+                "Register at redfox.hk and create an API key.",
+                "Pipe the key into the Skill: printf %s '<KEY>' | manage redfox-set-key.",
+                "Never paste the key into ordinary chat or command-line arguments.",
             ],
-            "cookie_rule": (
-                "copy the complete cookie set from Application storage; do not copy "
-                "only selected keys"
-            ),
-            "cookie_diagnostic_keys": sorted(RECOMMENDED_COOKIE_KEYS),
-            "cookie_session_checklist": sorted(SESSION_COOKIE_KEYS),
-            "token_rule": (
-                "use the numeric token from the current authenticated "
-                "mp.weixin.qq.com page URL; never use a /wxamp/ token"
-            ),
+            "note": "paid per-call API; data covers articles from 2026-04-01 onward",
         },
         "search_window": {
             "required_question": "每次希望搜索多久以内的文章？",
@@ -481,10 +348,10 @@ def setup_guide() -> dict[str, Any]:
         "configuration_manifest": {
             "collect_before_execution": [
                 "credential input channel",
-                "complete WeChat Cookie and numeric token",
+                "redfox API key via stdin",
                 "subscription account names",
                 "search window",
-                "unlisted-publisher policy: ask, ingest once, or auto-subscribe",
+                "whether routine Feishu provisioning and qualified-record sync are allowed",
                 "whether Feishu is skipped, mapped to an existing table, or provisioned",
                 "Feishu identity, exact App ID, human manager, and target or Base/table names",
                 "whether routine Feishu provisioning and qualified-record sync are allowed",
@@ -519,7 +386,6 @@ def setup_guide() -> dict[str, Any]:
             "show_command": "manage execution-policy show",
             "set_command": (
                 "manage execution-policy set --mode autopilot "
-                "--unlisted-publisher ask|ingest_once|auto_subscribe "
                 "--feishu-provisioning allow|deny "
                 "--feishu-sync allow|deny "
                 "[--base-name <BASE> --table-name <TABLE>] --yes"
@@ -644,14 +510,14 @@ def config_from_agent_payload(
             )
         elif "feishu_base_token" in payload or "feishu_table_id" in payload:
             feishu["destination"] = "skip"
-    cookie = normalize_cookie(_required_string(payload, "wechat_cookie"))
-    token = _required_string(payload, "wechat_token")
-    _warn_credential_shape(cookie, token)
     config = deepcopy(existing) if existing is not None else deepcopy(DEFAULT_CONFIG)
-    config["wechat"] = {
-        "cookie": cookie,
-        "token": token,
-    }
+    if "redfox_api_key" in payload:
+        api_key = str(payload.get("redfox_api_key") or "").strip()
+        if not api_key:
+            raise ConfigError("redfox_api_key must be a non-empty string")
+        config["redfox"] = {"api_key": api_key}
+    elif existing is None and not config["redfox"]["api_key"].strip():
+        raise ConfigError("first-time setup requires redfox_api_key")
     if "subscriptions" in payload:
         config["subscriptions"] = _normalize_subscriptions(
             payload.get("subscriptions")
@@ -685,7 +551,7 @@ def config_from_agent_payload(
             partial=True,
             existing=config["setup"]["execution_policy"],
         )
-    return validate_config(config, require_wechat=True)
+    return validate_config(config)
 
 
 def _normalize_settings(
@@ -756,17 +622,6 @@ def _apply_section_patch(
         config["feishu"] = normalized_feishu
         invalidate_for_feishu_change(config, previous_feishu, normalized_feishu)
         _record_feishu_identity_choice(config, payload)
-    elif section == "wechat":
-        if not isinstance(payload, dict):
-            raise ConfigError("wechat credential update must be an object")
-        unexpected = set(payload) - {"wechat_cookie", "wechat_token"}
-        if unexpected:
-            raise ConfigError(f"wechat update contains unsupported keys: {sorted(unexpected)}")
-        cookie = normalize_cookie(_required_string(payload, "wechat_cookie"))
-        token = _required_string(payload, "wechat_token")
-        _warn_credential_shape(cookie, token)
-        config["wechat"] = {"cookie": cookie, "token": token}
-        _reset_health(config, "wechat")
     elif section == "subscriptions":
         value = payload.get("subscriptions") if isinstance(payload, dict) else payload
         config["subscriptions"] = _normalize_subscriptions(value)
@@ -787,9 +642,19 @@ def _apply_section_patch(
         config["setup"]["execution_policy"] = _normalize_execution_policy(
             payload, partial=True, existing=config["setup"]["execution_policy"]
         )
+    elif section == "redfox":
+        if not isinstance(payload, dict):
+            raise ConfigError("redfox credential update must be an object")
+        unexpected = set(payload) - {"api_key"}
+        if unexpected:
+            raise ConfigError(f"redfox update contains unsupported keys: {sorted(unexpected)}")
+        api_key = str(payload.get("api_key") or "").strip()
+        if not api_key:
+            raise ConfigError("redfox.api_key must be a non-empty string")
+        config["redfox"] = {"api_key": api_key}
     else:
         raise ConfigError(f"unsupported setup section: {section}")
-    return validate_config(config, require_wechat=True)
+    return validate_config(config)
 
 
 def _save_agent_raw(raw: str, *, section: str = "full", json_output: bool = False) -> int:
@@ -832,10 +697,6 @@ def _save_agent_raw(raw: str, *, section: str = "full", json_output: bool = Fals
         "execution_policy_confirmed": config["setup"]["execution_policy"]["confirmed"],
         "credentials_echoed": False,
     }
-    if section in {"full", "wechat"}:
-        result["wechat_credential_check"] = credential_shape(
-            config["wechat"]["cookie"], config["wechat"]["token"]
-        )
     if not config["setup"]["search_window_confirmed"]:
         next_action = "ask_user_for_search_window"
     elif config["feishu"]["destination"] == "undecided":
@@ -952,23 +813,12 @@ def _prompt_number(label: str, default: float, minimum: float, maximum: float) -
 
 
 def _interactive_setup() -> int:
-    print("WeChat Article Subscriber — local setup")
+    print("WeChat Article Subscriber — local setup (redfox data source)")
     print("Credentials are entered locally and are not sent to an AI conversation.")
-    print(
-        "Sign in at https://mp.weixin.qq.com/. Open browser developer tools > "
-        "Application > Storage > Cookies > https://mp.weixin.qq.com/. Copy every "
-        "cookie row as name=value and join them with '; '. Copy the numeric token "
-        "query parameter from the current authenticated page URL (never /wxamp/)."
-    )
-    print(
-        "Do not assemble selected Cookie keys. The complete header should commonly "
-        "include rand_info and slave_bizuin; session keys may include slave_sid, "
-        "slave_user, bizuin/data_bizuin, and data_ticket."
-    )
-    cookie = normalize_cookie(getpass.getpass("WeChat Cookie (hidden): "))
-    token = getpass.getpass("WeChat token (hidden): ").strip()
-    if not cookie or not token:
-        print("Cookie and token are required")
+    print("Create an API key at https://redfox.hk/ first.")
+    api_key = getpass.getpass("redfox API key (hidden): ").strip()
+    if not api_key:
+        print("The redfox API key is required")
         return 1
     subscriptions = []
     print("Add exact account names and/or WeChat aliases. Blank name finishes the list.")
@@ -981,7 +831,6 @@ def _interactive_setup() -> int:
             continue
         alias = input("WeChat alias (recommended, optional): ").strip()
         subscriptions.append({"name": name, "alias": alias})
-    _warn_credential_shape(cookie, token)
     print(
         "Choose the Feishu destination now; an omitted choice is never treated as skip."
     )
@@ -996,8 +845,8 @@ def _interactive_setup() -> int:
     request_delay = _prompt_number("Request delay seconds", 3, 0, 60)
     min_score = _prompt_number("Minimum Feishu score", 6, 1, 10)
     config = {
-        **DEFAULT_CONFIG,
-        "wechat": {"cookie": cookie, "token": token},
+        **deepcopy(DEFAULT_CONFIG),
+        "redfox": {"api_key": api_key},
         "subscriptions": subscriptions,
         "feishu": {
             **deepcopy(DEFAULT_CONFIG["feishu"]),
@@ -1029,12 +878,12 @@ def main(argv: list[str] | None = None) -> int:
         "--section",
         choices=(
             "full",
-            "wechat",
             "subscriptions",
             "settings",
             "preferences",
             "feishu",
             "execution_policy",
+            "redfox",
         ),
         default="full",
         help="configuration section for --agent-stdin/--agent-file",

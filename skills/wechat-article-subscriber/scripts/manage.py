@@ -20,6 +20,7 @@ from article_inbox import queue_summary
 from bitable_client import (
     LarkCLIError,
     create_standard_base,
+    probe_app_secret_resolution,
     created_base_identifiers,
     feishu_identity_context,
     grant_bot_created_resource,
@@ -57,8 +58,7 @@ from protocol import dump, failure, success
 STEP_LABELS = {
     "feishu_destination": "确认是否写入飞书多维表格",
     "local_config": "准备本地配置文件",
-    "wechat_credentials": "填写微信 Cookie 和 token",
-    "wechat_validation": "验证微信登录状态",
+    "redfox_credentials": "配置 redfox API Key",
     "search_window": "确认文章搜索时间范围",
     "subscriptions": "添加订阅公众号",
     "subscription_resolution": "确认公众号匹配结果",
@@ -73,13 +73,15 @@ ACTION_LABELS = {
     "ask_user_for_feishu_destination": "选择跳过飞书、映射现有多维表格或创建新表",
     "import_current_feishu_bot_context": "从当前飞书机器人会话导入 App ID 和发送者 Open ID",
     "bind_detected_feishu_bot": "绑定当前飞书会话的机器人应用",
-    "ask_user_to_choose_chat_or_local_file": "选择在聊天中配置，或编辑本地配置文件",
     "repair_local_config_file": "修复本地配置文件中的 JSON 或字段错误",
     "edit_local_config_file": "填写并保存本地配置文件",
-    "run_online_doctor": "验证微信 Cookie、token 和公众号",
+    "run_online_doctor": "在线体检 redfox API 与飞书",
+    "run_redfox_key_setup": "通过 stdin 设置 redfox API Key",
     "ask_user_for_search_window": "选择文章搜索时间范围",
     "ask_for_subscription_names": "添加至少一个公众号",
-    "resolve_and_confirm_subscriptions": "确认公众号搜索匹配结果",
+    "edit_subscriptions_add_alias": "为缺少微信号的订阅补充 alias（广域库仅认微信号）",
+    "ask_user_to_choose_chat_or_local_file": "选择在聊天中配置，或编辑本地配置文件",
+    "run_feishu_context_then_authorize_only_if_needed": "验证飞书上下文，仅在缺失时发起授权",
     "review_and_apply_subscription_batch": "检查批量订阅预览并确认写入",
     "review_and_confirm_execution_policy": "一次确认后续自动执行范围",
     "ask_feishu_identity_before_authorization": "选择个人用户或机器人身份",
@@ -91,6 +93,7 @@ ACTION_LABELS = {
     "resolve_and_save_feishu_manager": "确认接收机器人文件管理权限的飞书用户",
     "select_feishu_app": "选择并固定本技能要使用的飞书 App ID",
     "configure_private_lark_profile": "在技能私有目录中配置已选飞书应用",
+    "provide_app_secret_for_private_profile": "从飞书开放平台复制 App Secret 并经 stdin 初始化私有配置",
     "provision_configured_feishu_base": "自动创建并验证已批准的飞书多维表格",
     "configure_existing_feishu_target": "配置一个明确的现有飞书目标表格",
     "rerun_with_yes_or_update_execution_policy": "确认本次创建，或更新一次性自动执行范围",
@@ -127,8 +130,7 @@ def _progress(
         checks.extend(
             (step, False, False)
             for step in (
-                "wechat_credentials",
-                "wechat_validation",
+                "redfox_credentials",
                 "search_window",
                 "subscriptions",
                 "subscription_resolution",
@@ -138,23 +140,19 @@ def _progress(
         )
     else:
         subscriptions = config["subscriptions"]
-        wechat_health = config["health"]["wechat"]
-        wechat_ready = bool(wechat_health["last_verified_at"]) and not bool(
-            wechat_health["consecutive_failures"]
-        )
         checks.extend(
             [
                 (
-                    "wechat_credentials",
-                    bool(config["wechat"]["cookie"].strip() and config["wechat"]["token"].strip()),
+                    "redfox_credentials",
+                    bool(config["redfox"]["api_key"].strip()),
                     False,
                 ),
-                ("wechat_validation", wechat_ready, False),
                 ("search_window", bool(config["setup"]["search_window_confirmed"]), False),
                 ("subscriptions", bool(subscriptions), False),
                 (
                     "subscription_resolution",
-                    bool(subscriptions) and all(str(item.get("biz", "")).strip() for item in subscriptions),
+                    bool(subscriptions)
+                    and all(str(item.get("alias", "")).strip() for item in subscriptions),
                     False,
                 ),
                 (
@@ -235,7 +233,7 @@ def _expected_app_id(config: dict[str, Any]) -> str:
     return str(config["feishu"].get("expected_app_id") or "").strip()
 
 
-def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
+def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
     report: dict[str, Any] = {
         "runtime": {
             "python": platform.python_version(),
@@ -316,36 +314,27 @@ def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
 
     online_report: dict[str, Any] = {}
     if online:
-        try:
-            from discover_only import resolve_subscriptions
-            from wechat_api import WeChatAPI
+        from redfox_client import RedfoxClient
 
-            api = WeChatAPI(
-                config["wechat"]["cookie"],
-                config["wechat"]["token"],
-                request_delay=config["settings"]["request_delay"],
-            )
-            api.search_account("微信", begin=0, count=1)
-            config = update_health("wechat", success=True)
-            online_report["wechat"] = {"ok": True}
-            resolutions = resolve_subscriptions(
-                config,
-                api=api,
-                save=save_resolved,
-            )
-            unresolved = sum(item["status"] not in {"resolved", "exact"} for item in resolutions)
-            online_report["subscriptions"] = {
-                "ok": unresolved == 0,
-                "unresolved": unresolved,
-                "results": resolutions,
+        api_key = config["redfox"]["api_key"].strip()
+        if not api_key:
+            online_report["redfox"] = {
+                "ok": False,
+                "error_code": "REDFOX_AUTH",
+                "message": "redfox API key is missing; run redfox-set-key",
             }
-        except Exception as exc:  # classified and redacted by the protocol layer
+        else:
+            client = RedfoxClient(api_key)
             try:
-                update_health("wechat", success=False, failure_kind=type(exc).__name__)
-            except Exception:
-                pass
-            online_report["wechat"] = failure(exc)["error"]
-
+                # The probe only proves the key authenticates and the
+                # service answers; a code=0 response with an empty list is
+                # still a pass. Connectivity, not coverage.
+                client.query_work_list(account="probe", offset=0, count=1)
+                online_report["redfox"] = {"ok": True}
+            except Exception as exc:
+                online_report["redfox"] = failure(exc)["error"]
+            finally:
+                client.close()
         if config["feishu"]["enabled"]:
             try:
                 result = production_feishu_target(config["feishu"]).check()
@@ -373,7 +362,7 @@ def _doctor(*, online: bool, save_resolved: bool) -> tuple[dict[str, Any], str]:
 
 
 def _status() -> tuple[dict[str, Any], str]:
-    report, next_action = _doctor(online=False, save_resolved=False)
+    report, next_action = _doctor(online=False)
     data = {
         "setup_stage": report["setup_stage"],
         "progress": report["progress"],
@@ -840,7 +829,18 @@ def _feishu_local_profile(
             }
         }, "rerun_with_yes"
     result = import_global_lark_profile(expected_app_id, private_profile)
-    return result, "run_feishu_context_then_authorize_only_if_needed"
+    # An import can clone the keychain *reference* while the isolated home
+    # cannot decrypt it; prove the secret works before telling the user the
+    # profile is ready, and surface the console-copy remediation when not.
+    probe = probe_app_secret_resolution()
+    result["app_secret_resolvable"] = probe["resolvable"]
+    if not probe["resolvable"]:
+        result["app_secret_remediation"] = probe.get("remediation") or probe.get("message")
+    return result, (
+        "run_feishu_context_then_authorize_only_if_needed"
+        if probe["resolvable"]
+        else "provide_app_secret_for_private_profile"
+    )
 
 
 def _feishu_grant_manager(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
@@ -1070,7 +1070,6 @@ def _execution_policy_command(
             "policy": deepcopy(policy_for(config)),
             "allowed_when_confirmed": [
                 "routine discovery, reading, scoring, queueing, and export",
-                "the configured unlisted-publisher behavior",
                 "exact-name standard Feishu Base provisioning when enabled",
                 "qualified record sync to the configured Feishu target when enabled",
             ],
@@ -1099,16 +1098,8 @@ def _execution_policy_command(
         raise ValueError(
             "Feishu provisioning cannot be allowed when destination=existing"
         )
-    if arguments.mode == "guided":
-        if (
-            arguments.unlisted_publisher != "ask"
-            or provisioning_allowed
-            or sync_allowed
-        ):
-            raise ValueError(
-                "guided mode requires unlisted-publisher=ask and both Feishu "
-                "permissions=deny"
-            )
+    if arguments.mode == "guided" and (provisioning_allowed or sync_allowed):
+        raise ValueError("guided mode requires both Feishu permissions=deny")
     if provisioning_allowed and (not base_name or not table_name):
         raise ValueError(
             "--base-name and --table-name are required when Feishu provisioning is allowed"
@@ -1121,7 +1112,6 @@ def _execution_policy_command(
         **deepcopy(DEFAULT_CONFIG["setup"]["execution_policy"]),
         "confirmed": True,
         "mode": arguments.mode,
-        "unlisted_publisher": arguments.unlisted_publisher,
         "allow_feishu_provisioning": provisioning_allowed,
         "provision_base_name": base_name,
         "provision_table_name": table_name,
@@ -1312,6 +1302,11 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
         }
         if not candidate:
             raise ValueError("provide --name, --alias, or --biz")
+        if not candidate.get("alias"):
+            raise ValueError(
+                "--alias is required: the redfox wide library identifies "
+                "accounts by WeChat alias only"
+            )
         identity = {str(candidate.get(key, "")).casefold() for key in ("name", "alias", "biz") if candidate.get(key)}
         state: dict[str, Any] = {}
 
@@ -1502,6 +1497,72 @@ def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     return {"preferences": saved["preferences"], "updated_fields": sorted(updates)}, "generate_digest_plan"
 
 
+def _key_tail(api_key: str) -> str:
+    """Last four characters only; empty for keys too short to be identifiable."""
+    return api_key[-4:] if len(api_key) >= 8 else ""
+
+
+def _read_secret_stdin(name: str) -> str:
+    """Read a bounded secret from piped stdin, never from an interactive TTY."""
+    if sys.stdin.isatty():
+        raise ValueError(f"{name} must be piped on standard input, not typed interactively")
+    value = sys.stdin.read(64 * 1024 + 1)
+    if len(value) > 64 * 1024:
+        raise ValueError(f"{name} exceeds 64 KiB")
+    return value.strip()
+
+
+def _probe_redfox(api_key: str) -> dict[str, Any]:
+    """One paid reachability probe; classifies failures via the protocol."""
+    from redfox_client import RedfoxAuthError, RedfoxClient
+
+    client = RedfoxClient(api_key)
+    try:
+        # The probe only proves the key authenticates and the service answers;
+        # a code=0/3203 response with an empty list is still a pass.
+        client.query_work_list(account="probe", offset=0, count=1)
+        return {"reachable": True}
+    except RedfoxAuthError:
+        return {"reachable": False, "error_code": "REDFOX_AUTH"}
+    except Exception as exc:  # classified by the protocol layer
+        return {"reachable": False, "error_code": getattr(exc, "code", type(exc).__name__)}
+    finally:
+        client.close()
+
+
+def _redfox_set_key() -> tuple[dict[str, Any], str]:
+    api_key = _read_secret_stdin("the redfox API key")
+    if not api_key:
+        raise ValueError("the redfox API key is empty")
+
+    def mutate_key(config: dict[str, Any]) -> dict[str, Any]:
+        config["redfox"]["api_key"] = api_key
+        return config
+
+    saved = modify_config(mutate_key)
+    return {
+        "configured": bool(saved["redfox"]["api_key"].strip()),
+        "key_tail": _key_tail(api_key),
+    }, "discover_articles"
+
+
+def _redfox_status(*, verify: bool = False) -> tuple[dict[str, Any], str]:
+    config = load_config()
+    api_key = config["redfox"]["api_key"].strip()
+    data: dict[str, Any] = {
+        "configured": bool(api_key),
+        "key_tail": _key_tail(api_key),
+    }
+    if api_key and verify:
+        # One paid call; only on explicit request.
+        data.update(_probe_redfox(api_key))
+    elif api_key:
+        data["reachable"] = None  # not checked; pass --verify for a live probe
+    else:
+        data["reachable"] = False
+    return data, "none"
+
+
 def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     scope = arguments.scope
     targets: list[Path] = []
@@ -1540,7 +1601,7 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         return {"preview": [str(path) for path in existing], "deleted": []}, "rerun_with_yes"
     if scope == "credentials":
         def mutate_reset(config: dict[str, Any]) -> dict[str, Any]:
-            config["wechat"] = {"cookie": "", "token": ""}
+            config["redfox"] = {"api_key": ""}
             config["setup"]["feishu_identity_confirmed"] = False
             config["setup"]["feishu_authorization"] = dict(
                 DEFAULT_CONFIG["setup"]["feishu_authorization"]
@@ -1587,20 +1648,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", choices=("json", "text"), default="json")
     commands = parser.add_subparsers(dest="command", required=True)
     doctor = commands.add_parser("doctor")
-    doctor.add_argument("--online", action="store_true")
-    doctor.add_argument("--save-resolved", action="store_true")
+    doctor.add_argument(
+        "--online",
+        action="store_true",
+        help="include live checks; the redfox probe makes 1 billed API call",
+    )
     commands.add_parser("status")
+    # The redfox key is always read from piped stdin; there is no flag so no
+    # caller can believe it may pass the secret as an argument.
+    commands.add_parser(
+        "redfox-set-key",
+        description="read the redfox API key from piped standard input",
+    )
+    redfox_status = commands.add_parser("redfox-status")
+    redfox_status.add_argument(
+        "--verify",
+        action="store_true",
+        help="make one paid API call to verify connectivity",
+    )
     commands.add_parser("config-show")
     policy = commands.add_parser("execution-policy")
     policy_commands = policy.add_subparsers(dest="policy_command", required=True)
     policy_commands.add_parser("show")
     set_policy = policy_commands.add_parser("set")
     set_policy.add_argument("--mode", choices=("guided", "autopilot"), required=True)
-    set_policy.add_argument(
-        "--unlisted-publisher",
-        choices=("ask", "ingest_once", "auto_subscribe"),
-        required=True,
-    )
     set_policy.add_argument(
         "--feishu-provisioning",
         choices=("allow", "deny"),
@@ -1709,9 +1780,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         next_action = "none"
         if arguments.command == "doctor":
-            data, next_action = _doctor(online=arguments.online, save_resolved=arguments.save_resolved)
+            data, next_action = _doctor(online=arguments.online)
         elif arguments.command == "status":
             data, next_action = _status()
+        elif arguments.command == "redfox-set-key":
+            data, next_action = _redfox_set_key()
+        elif arguments.command == "redfox-status":
+            data, next_action = _redfox_status(verify=arguments.verify)
         elif arguments.command == "config-show":
             data = redacted_config(load_config())
         elif arguments.command == "execution-policy":
@@ -1742,12 +1817,12 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "subscriptions":
             data = _subscriptions(arguments)
             if arguments.subscription_command == "add":
-                next_action = "resolve_and_confirm_subscriptions"
+                next_action = "discover_articles"
             elif arguments.subscription_command == "bulk-add" and data["added_count"]:
                 next_action = (
                     "review_and_apply_subscription_batch"
                     if arguments.dry_run
-                    else "resolve_and_confirm_subscriptions"
+                    else "discover_articles"
                 )
         elif arguments.command == "preferences":
             data, next_action = _preferences(arguments)

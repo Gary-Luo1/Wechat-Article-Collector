@@ -96,6 +96,11 @@ def _validate_article(article: Any, location: str) -> None:
     for key in ("title", "digest", "account"):
         if key in article and not isinstance(article[key], str):
             raise ValueError(f"{location}.{key} must be a string")
+    for key in ("content", "content_source", "work_uuid"):
+        if key in article and article[key] is not None and not isinstance(article[key], str):
+            raise ValueError(f"{location}.{key} must be a string")
+    if article.get("content_source", "direct") not in {"redfox", "direct"}:
+        raise ValueError(f"{location}.content_source must be redfox or direct")
     for key in ("id", "normalized_url", "content_hash", "discovered_at", "inbox_updated_at"):
         if key in article and article[key] is not None and not isinstance(article[key], str):
             raise ValueError(f"{location}.{key} must be a string")
@@ -183,6 +188,58 @@ def add_pending(articles: list[dict[str, Any]], *, content_dedup: bool = False) 
             added += 1
         _write_unlocked(data)
         return added
+
+
+def cache_article_content(link: str, content: str) -> None:
+    """Persist a lazily fetched body on a pending article (paid-API economy)."""
+    normalized = normalize_url(link)
+    with queue_lock():
+        data = _read_unlocked()
+        article = next(
+            (item for item in data["pending"] if item.get("normalized_url") == normalized),
+            None,
+        )
+        if article is None:
+            return
+        article["content"] = content
+        _write_unlocked(data)
+
+
+def retire_legacy_pending() -> int:
+    """One-time migration: retire pre-redfox entries that can never be read.
+
+    Entries queued by the removed WeChat pipeline carry no cached body and no
+    redfox work_uuid, so no future command can read or score them. Re-running
+    discovery cannot repair them either (URL dedup keeps the old entry), so
+    they are moved to processed with an explicit legacy disposition instead
+    of blocking the pending list forever.
+    """
+    with queue_lock():
+        data = _read_unlocked()
+        now = datetime.now(timezone.utc).isoformat()
+        kept: list[dict[str, Any]] = []
+        retired = 0
+        for article in data["pending"]:
+            if (
+                not str(article.get("content") or "").strip()
+                and not str(article.get("work_uuid") or "").strip()
+                and not article.get("content_source")
+            ):
+                article["inbox_updated_at"] = now
+                data["processed"][article["normalized_url"]] = {
+                    "article": deepcopy(article),
+                    "content_hash": article.get("content_hash"),
+                    "processed_at": now,
+                    "sync_status": "not_requested",
+                    "metadata": {"disposition": "legacy_unreadable"},
+                }
+                retired += 1
+            else:
+                kept.append(article)
+        if retired:
+            data["pending"] = kept
+            _write_unlocked(data)
+        return retired
 
 
 def resolve_pending(*, index: int | None = None, link: str | None = None) -> dict[str, Any]:

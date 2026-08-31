@@ -83,25 +83,18 @@ def next_stage(
     config: dict[str, Any], *, cli: dict[str, Any] | None = None
 ) -> tuple[str, str]:
     """Compute the next safe setup action from persisted state and CLI facts."""
-    if not config["wechat"]["cookie"].strip() or not config["wechat"]["token"].strip():
-        return "wechat_credentials_missing", "ask_user_to_choose_chat_or_local_file"
-    wechat_health = config["health"]["wechat"]
-    if wechat_health["consecutive_failures"]:
-        if wechat_health["last_failure_kind"] in {
-            "WeChatCookieExpired",
-            "WeChatTokenExpired",
-            "WeChatCredentialContextError",
-        }:
-            return "wechat_credentials_expired", "ask_user_to_choose_chat_or_local_file"
-        return "wechat_validation_failed", "run_online_doctor"
-    if not wechat_health["last_verified_at"]:
-        return "wechat_unverified", "run_online_doctor"
+    if not config["redfox"]["api_key"].strip():
+        return "redfox_credentials_missing", "run_redfox_key_setup"
     if not config["setup"]["search_window_confirmed"]:
         return "search_window_unconfirmed", "ask_user_for_search_window"
     if not config["subscriptions"]:
         return "subscriptions_missing", "ask_for_subscription_names"
-    if any(not str(item.get("biz", "")).strip() for item in config["subscriptions"]):
-        return "subscriptions_unresolved", "resolve_and_confirm_subscriptions"
+    if any(
+        not str(item.get("alias", "")).strip() for item in config["subscriptions"]
+    ):
+        # The redfox wide library queries accounts by WeChat alias only; a
+        # display name or bare biz id can never be discovered.
+        return "subscriptions_unresolved", "edit_subscriptions_add_alias"
     destination = config["feishu"]["destination"]
     if destination == "undecided":
         return "feishu_destination_unconfirmed", "ask_user_for_feishu_destination"
