@@ -1082,13 +1082,22 @@ def created_base_identifiers(payload: dict[str, Any]) -> tuple[str, str]:
             if value.strip()
         )
     )
+    # lark-cli >= 1.0.9x nests the created table under data.table as an object
+    # ({"id": "tbl...", ...}); the generic string scan below cannot see it.
+    nested_table = _payload_data(payload).get("table")
+    nested_table_id = str(
+        nested_table.get("id", "") if isinstance(nested_table, dict) else ""
+    ).strip()
     table_ids = list(
         dict.fromkeys(
-            value.strip()
-            for value in _find_values(
-                payload, {"tableid", "defaulttableid", "createdtableid"}
-            )
-            if value.strip()
+            [nested_table_id]
+            + [
+                value.strip()
+                for value in _find_values(
+                    payload, {"tableid", "defaulttableid", "createdtableid"}
+                )
+                if value.strip()
+            ]
         )
     )
     base_token = next(

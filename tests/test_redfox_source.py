@@ -580,3 +580,20 @@ def test_first_contact_commands_seed_missing_config(isolated_home, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("k-12345678"))
     manage.main(["--format", "text", "subscriptions", "add", "--name", "机器之心", "--alias", "a1"])
     assert config_path().exists()
+
+
+def test_created_base_identifiers_parses_nested_table_object():
+    # lark-cli 1.0.9x returns the created table as data.table = {"id": ...},
+    # which the generic string scan cannot see.
+    from bitable_client import created_base_identifiers
+
+    payload = {
+        "ok": True,
+        "data": {
+            "base": {"base_token": "BASExyz", "url": "https://x/base/BASExyz"},
+            "table": {"id": "tblNested123", "name": "文章列表", "fields": []},
+            "default_table_deleted": True,
+            "deleted_default_table_id": "tblOld",
+        },
+    }
+    assert created_base_identifiers(payload) == ("BASExyz", "tblNested123")

@@ -4,6 +4,11 @@
 
 ### Fixed (adversarial-review hardening)
 
+- `manage feishu-create-base` again extracts the created table ID: lark-cli
+  1.0.9x nests it under `data.table` as an object, which the previous
+  string-only scan could not see (creation succeeded but was reported as a
+  failure, leaving stray duplicate bases).
+
 - Pagination cannot loop unboundedly on hostile/broken responses: requests now
   carry the page size, duplicate and fully-unusable pages stop the loop, and a
   hard page cap bounds the worst case.
