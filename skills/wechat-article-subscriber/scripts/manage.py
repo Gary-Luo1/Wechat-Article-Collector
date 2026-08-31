@@ -32,6 +32,7 @@ from bitable_client import (
 )
 from config_store import (
     DEFAULT_CONFIG,
+    save_config,
     ConfigError,
     load_config,
     modify_config,
@@ -1746,6 +1747,10 @@ def _redfox_set_key() -> tuple[dict[str, Any], str]:
     api_key = _read_secret_stdin("the redfox API key")
     if not api_key:
         raise ValueError("the redfox API key is empty")
+    if not config_path().exists():
+        # The key is the very first credential a fresh user provides; seeding
+        # the default configuration here must not require any prior setup.
+        save_config(validate_config(dict(DEFAULT_CONFIG)))
 
     def mutate_key(config: dict[str, Any]) -> dict[str, Any]:
         config["redfox"]["api_key"] = api_key

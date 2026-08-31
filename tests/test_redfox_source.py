@@ -557,3 +557,15 @@ def test_feishu_app_secret_requires_bound_matching_app(isolated_home, monkeypatc
     monkeypatch.setattr("sys.stdin", monkeypatched_stdin)
     with pytest.raises(ValueError, match="App Secret is empty"):
         manage._feishu_app_secret(types_simple_namespace(app_id=""))
+
+
+def test_redfox_set_key_seeds_missing_config(isolated_home, monkeypatch):
+    import io
+    import manage
+    from config_store import load_config, config_path
+
+    assert not config_path().exists()  # truly fresh user
+    monkeypatch.setattr("sys.stdin", io.StringIO("fresh-key-12345678"))
+    data, _ = manage._redfox_set_key()
+    assert data["configured"] is True
+    assert load_config()["redfox"]["api_key"] == "fresh-key-12345678"
