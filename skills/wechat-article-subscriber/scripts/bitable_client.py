@@ -973,16 +973,18 @@ def verify_feishu_identity(
         or identity_status.get("status") != "ready"
         or (
             selected_identity == "user"
-            and identity_status.get("tokenStatus") not in {None, "valid"}
+            and identity_status.get("tokenStatus")
+            not in {None, "valid", "needs_refresh"}
         )
     ):
         label = "user authorization" if selected_identity == "user" else "bot identity"
         raise LarkCLIError(
             f"Feishu {label} is not ready. "
             + (
-                "Start split-flow authorization with auth login --domain base --no-wait "
-                "--json, show the URL and QR code, then finish with --device-code in the "
-                "next conversation turn."
+                "A needs_refresh token auto-refreshes on the next real API call, so "
+                "retrying the sync usually succeeds; only start split-flow "
+                "authorization (auth login --domain base --no-wait --json) if a "
+                "retry still fails."
                 if selected_identity == "user"
                 else "Configure the app secret and required backend scopes; do not run user auth."
             ),

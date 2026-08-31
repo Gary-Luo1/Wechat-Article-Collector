@@ -650,3 +650,43 @@ def test_wizard_bot_branch_skips_oauth(isolated_home):
     state, action = manage._feishu_setup()
     assert action == "resolve_and_save_feishu_manager"
     assert "不需要扫码" in state["next_question"]
+
+
+def test_needs_refresh_token_is_accepted(monkeypatch):
+    import bitable_client
+
+    def fake_run(args, **kwargs):
+        if "auth" in args:
+            return {
+                "ok": True,
+                "data": {
+                    "identities": {
+                        "user": {
+                            "available": True,
+                            "status": "ready",
+                            "tokenStatus": "needs_refresh",
+                            "openId": "ou_expected",
+                        }
+                    }
+                },
+                # one unambiguous app id anywhere in the payload
+            }
+        raise AssertionError("unexpected call")
+
+    # inject appid so the unambiguity check passes
+    original = fake_run
+
+    def fake_run2(args, **kwargs):
+        payload = original(args, **kwargs)
+        if isinstance(payload, dict):
+            payload["appid"] = "cli_confirmed123"
+        return payload
+
+    monkeypatch.setattr(bitable_client, "_run_lark", fake_run2)
+    cfg = {
+        "expected_app_id": "cli_confirmed123",
+        "identity": "user",
+        "expected_user_open_id": "ou_expected",
+    }
+    result = bitable_client.verify_feishu_identity(cfg, identity="user")
+    assert result["status"] == "ready"
