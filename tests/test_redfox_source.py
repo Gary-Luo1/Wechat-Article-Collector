@@ -597,3 +597,56 @@ def test_created_base_identifiers_parses_nested_table_object():
         },
     }
     assert created_base_identifiers(payload) == ("BASExyz", "tblNested123")
+
+
+def test_next_step_drives_dialogue_until_ready(isolated_home):
+    import manage
+    from config_store import save_config
+
+    cfg = _config()
+    cfg["setup"]["search_window_confirmed"] = True
+    cfg["feishu"]["destination"] = "skip"
+    cfg["setup"]["execution_policy"]["confirmed"] = True
+    save_config(cfg)
+    state, _ = manage._next_step()
+    assert state["ready"] is True
+    assert "daily" in state["command"]
+
+    cfg["redfox"]["api_key"] = ""
+    save_config(cfg)
+    state, action = manage._next_step()
+    assert action == "collect_redfox_key"
+    assert "redfox.hk" in state["question"]
+
+
+def test_parse_feishu_base_url_variants():
+    import manage
+
+    base, table = manage._parse_feishu_base_url(
+        "https://x.feishu.cn/base/BASE123?table=tblA&view=v"
+    )
+    assert (base, table) == ("BASE123", "tblA")
+    with pytest.raises(ValueError, match="table"):
+        manage._parse_feishu_base_url("https://x.feishu.cn/base/BASE123")
+    with pytest.raises(ValueError, match="base"):
+        manage._parse_feishu_base_url("https://x.feishu.cn/docs/abc")
+
+
+def test_wizard_bot_branch_skips_oauth(isolated_home):
+    import manage
+    from config_store import save_config
+
+    cfg = _config()
+    cfg["feishu"].update(
+        {
+            "identity": "bot",
+            "expected_app_id": "cli_x",
+            "cli_profile": "p1",
+            "destination": "skip",
+        }
+    )
+    cfg["setup"]["feishu_identity_confirmed"] = True
+    save_config(cfg)
+    state, action = manage._feishu_setup()
+    assert action == "resolve_and_save_feishu_manager"
+    assert "不需要扫码" in state["next_question"]

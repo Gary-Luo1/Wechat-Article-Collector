@@ -1115,8 +1115,12 @@ def created_base_identifiers(payload: dict[str, Any]) -> tuple[str, str]:
     return base_token, table_id
 
 
-def preflight_feishu(feishu: dict[str, Any]) -> dict[str, Any]:
-    if not feishu.get("enabled"):
+def preflight_feishu(
+    feishu: dict[str, Any], *, allow_disabled: bool = False
+) -> dict[str, Any]:
+    # allow_disabled: the provisioning flow verifies the freshly created target
+    # BEFORE flipping `enabled` on, so it must bypass the readiness gate.
+    if not feishu.get("enabled") and not allow_disabled:
         raise LarkCLIError("Feishu sync is disabled; complete Agent setup first", kind="config")
     identity = str(feishu.get("identity") or "user")
     verify_feishu_identity(feishu, identity=identity)

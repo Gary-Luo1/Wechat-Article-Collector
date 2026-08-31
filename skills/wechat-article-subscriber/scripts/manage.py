@@ -79,6 +79,7 @@ ACTION_LABELS = {
     "run_online_doctor": "在线体检 redfox API 与飞书",
     "run_redfox_key_setup": "通过 stdin 设置 redfox API Key",
     "confirm_daily_run": "确认以上计划后加 --yes 执行每日发现与简报",
+    "collect_redfox_key": "提供 redfox API Key（stdin 或对话内提供皆可）",
     "ask_user_for_search_window": "选择文章搜索时间范围",
     "ask_for_subscription_names": "添加至少一个公众号",
     "edit_subscriptions_add_alias": "为缺少微信号的订阅补充 alias（广域库仅认微信号）",
@@ -758,6 +759,62 @@ def _feishu_app(app_id: str) -> dict[str, Any]:
     }
 
 
+def _parse_feishu_base_url(url: str) -> tuple[str, str]:
+    """Extract (base_token, table_id) from a Feishu base URL."""
+    import urllib.parse as _up
+
+    raw = str(url or "").strip()
+    if not raw:
+        raise ValueError("provide the Feishu base URL, e.g. https://x.feishu.cn/base/BASE?table=tblX")
+    parsed = _up.urlparse(raw if "://" in raw else "https://" + raw)
+    parts = [part for part in parsed.path.split("/") if part]
+    base_token = ""
+    if "base" in parts:
+        idx = parts.index("base")
+        if idx + 1 < len(parts):
+            base_token = parts[idx + 1]
+    if not base_token:
+        raise ValueError("URL does not look like a Feishu base link (expect /base/<token>)")
+    query = _up.parse_qs(parsed.query)
+    table_id = (query.get("table") or query.get("tableId") or [""])[0]
+    if not table_id.startswith("tbl"):
+        raise ValueError(
+            "URL is missing the table parameter (?table=tbl...); open the exact table and copy its address bar URL"
+        )
+    return base_token, table_id
+
+
+def _feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+    """Map an existing Base table by URL, verifying read access and fields."""
+    from bitable_client import list_fields
+
+    base_token, table_id = _parse_feishu_base_url(arguments.url)
+    config = load_config()
+    identity = config["feishu"]["identity"]
+    fields = list_fields(base_token, table_id, identity=identity)
+
+    def mutate_target(cfg: dict[str, Any]) -> dict[str, Any]:
+        cfg["feishu"].update(
+            {
+                "destination": "existing",
+                "enabled": True,
+                "base_token": base_token,
+                "table_id": table_id,
+                "provisioning": "existing",
+            }
+        )
+        return cfg
+
+    saved = modify_config(mutate_target)
+    return {
+        "base_token": base_token,
+        "table_id": table_id,
+        "field_count": len(fields),
+        "field_names": [str(f.get("name", "")) for f in fields],
+        "enabled": saved["feishu"]["enabled"],
+    }, "run_feishu_context_then_authorize_only_if_needed"
+
+
 def _feishu_setup() -> tuple[dict[str, Any], str]:
     """Dialogue-ready Feishu onboarding state: what to ask, what to run next.
 
@@ -805,7 +862,16 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
             next_command="manage feishu-local-profile import --yes",
         )
         return state, "reuse_or_configure_private_lark_profile"
-    if state["authorization"] != "authorized":
+    if feishu["identity"] == "bot" and not config["feishu"]["manager_open_id"]:
+        state.update(
+            next_question=(
+                "bot 身份不需要扫码授权。请提供接收管理权限的飞书 Open ID"
+                "（曾用个人身份授权过的话我可自动读取）。"
+            ),
+            next_command="manage feishu-manager --open-id <OPEN_ID>",
+        )
+        return state, "resolve_and_save_feishu_manager"
+    if feishu["identity"] == "user" and state["authorization"] != "authorized":
         state.update(
             next_question="应用已绑定但密钥/授权未就绪：请提供 App Secret（stdin），随后完成一次扫码授权。",
             next_command=(
@@ -817,10 +883,37 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
         return state, "provide_app_secret_for_private_profile"
     if state["destination"] == "undecided":
         state.update(
-            next_question="文章写入飞书的哪里：跳过、映射现有表格、还是创建新 Base？",
+            next_question=(
+                "文章写入飞书的哪里？① 跳过 ② 写入已有表格（把表格链接发我即可，"
+                "会先只读校验字段）③ 新建标准表格（字段清单见 next_command_field_list，"
+                "确认后创建；bot 身份创建并授予你管理权限，全程免扫码）"
+            ),
             next_command="manage feishu-destination --mode skip|existing|create",
+            next_command_existing="manage feishu-target --url <表格链接>",
+            next_command_field_list=[
+                spec["name"] for spec in standard_field_schema()
+            ],
         )
         return state, "ask_user_for_feishu_destination"
+    if state["destination"] == "create" and not state["target_configured"]:
+        state.update(
+            next_question=(
+                "将创建标准文章表，字段：" + "、".join(spec["name"] for spec in standard_field_schema())
+                + ("；bot 身份创建后会把管理权限授予你（免扫码）。确认字段与名称后继续。"
+                   if feishu["identity"] == "bot" else "；需要一次扫码授权（最小权限）。")
+            ),
+            next_command=(
+                "manage execution-policy set --mode autopilot --feishu-provisioning allow "
+                "--base-name <名称> --table-name <表名> --feishu-sync allow --yes → "
+                "manage feishu-create-base --name <名称> --table-name <表名> --yes"
+                + (
+                    " → printf %s '<BASE_TOKEN>' | manage feishu-grant-manager --type bitable --token-stdin"
+                    if feishu["identity"] == "bot"
+                    else ""
+                )
+            ),
+        )
+        return state, "provision_configured_feishu_base"
     if not state["target_configured"] and state["destination"] == "create":
         state.update(
             next_question="确认创建标准文章表？",
@@ -1121,7 +1214,7 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
             # present (classified as kind="duplicate"); treat that as success.
         manager_granted = True
 
-    check = preflight_feishu(config["feishu"])
+    check = preflight_feishu(config["feishu"], allow_disabled=True)
 
     def mutate_complete(config: dict[str, Any]) -> dict[str, Any]:
         config["feishu"].update(
@@ -1461,6 +1554,103 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         "digest_candidates": digest["candidates"],
     }
     return plan, "read_score_digest_candidates"
+
+
+def _next_step() -> tuple[dict[str, Any], str]:
+    """One universal dialogue step: what to ask the user, what to run next.
+
+    The Agent loops on this command (plus `manage feishu-setup` inside the
+    Feishu branch) until it reports ready, so every configuration decision is
+    made in dialogue instead of by handing the user a command list.
+    """
+    try:
+        config = load_config()
+    except ConfigError:
+        return {
+            "stage": "fresh_install",
+            "question": "请提供 redfox API key（在 https://redfox.hk/ 控制台创建；也可自己执行 printf 管道命令以避免聊天留存）",
+            "command": "printf %s '<KEY>' | manage redfox-set-key",
+            "paid": False,
+        }, "collect_redfox_key"
+
+    if not config["redfox"]["api_key"].strip():
+        return {
+            "stage": "redfox_key_missing",
+            "question": "redfox API key 缺失：请在 https://redfox.hk/ 控制台创建后提供。",
+            "command": "printf %s '<KEY>' | manage redfox-set-key",
+            "paid": False,
+        }, "collect_redfox_key"
+
+    cli: dict[str, Any] | None = None
+    try:
+        cli = lark_cli_info()
+    except LarkCLIError:
+        cli = None
+    stage, action = next_stage(config, cli=cli)
+    questions: dict[str, tuple[str, str, bool]] = {
+        "search_window_unconfirmed": (
+            "每次拉多久以内的文章？24 小时（推荐）/ 48 小时 / 7 天 / 自定义",
+            "printf %s '{\"check_hours\":24}' | setup --agent-stdin --section settings",
+            False,
+        ),
+        "subscriptions_missing": (
+            "想订阅哪些公众号？直接报名称或微信号（微信号可在公众号手机主页查看；只报名称会花 1 次解析调用）",
+            "manage subscriptions add --name <名称> [--alias <微信号>]",
+            "名称模式 1 次调用/个",
+        ),
+        "subscriptions_unresolved": (
+            "有订阅缺少微信号（数据源只认微信号）：请补充对应 alias，或改用名称解析。",
+            "manage subscriptions add --name <名称> --alias <微信号>",
+            False,
+        ),
+        "feishu_destination_unconfirmed": (
+            "要把文章同步到飞书多维表格吗？跳过 / 写入已有表格 / 新建标准表格 —— 由 feishu-setup 引导（含字段确认与身份选择）",
+            "manage feishu-setup",
+            False,
+        ),
+        "feishu_identity_unconfirmed": ("请选择飞书执行身份（个人扫码 / 机器人免扫码）。", "manage feishu-setup", False),
+        "feishu_cli_missing_or_unchecked": (
+            "本地没有可用的 lark-cli：需要先安装（Node.js + npm install @larksuite/cli 到技能隔离目录）。是否现在安装？或先跳过飞书（manage feishu-destination --mode skip）。",
+            "manage feishu-setup",
+            False,
+        ),
+        "feishu_cli_incompatible": ("lark-cli 版本不兼容，需要安装受支持版本。", "manage feishu-setup", False),
+        "feishu_authorization_required": ("需要一次飞书扫码授权（最小权限）。",
+            "manage feishu-setup", False),
+        "feishu_authorization_waiting": ("上一次扫码授权还在等待：请完成页面确认或重新发起。",
+            "manage feishu-setup", False),
+        "feishu_manager_missing": ("机器人创建的资源需要一位管理员接收权限：请提供你的飞书 Open ID。",
+            "manage feishu-manager --open-id <OPEN_ID>", False),
+        "feishu_target_pending": ("已批准建表：确认字段清单后将自动创建标准文章表。",
+            "manage feishu-create-base --name <已批准名> --table-name <已批准名> --yes", False),
+        "feishu_target_missing": ("请提供目标表格：飞书表格链接（manage feishu-target --url <链接>）或按引导新建。",
+            "manage feishu-setup", False),
+        "feishu_validation_failed": ("飞书只读校验失败：按 feishu-setup 指引修复。", "manage feishu-setup", False),
+        "feishu_unverified": ("飞书配置完成后需要一次只读校验。", "process feishu-check --save-mapping", False),
+        "execution_policy_unconfirmed": (
+            "最后一步：一次性确认自动执行范围（发现/读取/评分 + 是否允许自动同步飞书）。预览后加 --yes 生效。",
+            "manage execution-policy set --mode autopilot --feishu-provisioning <allow|deny> --feishu-sync <allow|deny> [--base-name X --table-name Y] [--yes]",
+            False,
+        ),
+    }
+    if stage in {"ready_wechat_only", "ready"}:
+        return {
+            "stage": stage,
+            "question": None,
+            "command": "manage daily  （先预览，用户确认后 --yes 执行）",
+            "paid": "预览免费；执行按订阅数计费",
+            "ready": True,
+        }, "confirm_daily_run"
+    question, command, paid = questions.get(
+        stage, (None, "manage doctor --online", "1 次计费探测")
+    )
+    return {
+        "stage": stage,
+        "question": question or f"按诊断处理：{stage}",
+        "command": command,
+        "paid": paid,
+        "ready": False,
+    }, action
 
 
 def _resolve_alias_by_name(name: str) -> str:
@@ -1895,6 +2085,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands.add_parser("status")
     commands.add_parser("feishu-setup")
+    feishu_target = commands.add_parser("feishu-target")
+    feishu_target.add_argument("--url", required=True, help="Feishu base URL of the exact table")
+    commands.add_parser("next")
     app_secret = commands.add_parser("feishu-app-secret")
     app_secret.add_argument("--app-id", default="", help="optional; must match the confirmed App ID")
     daily = commands.add_parser("daily")
@@ -2040,6 +2233,10 @@ def main(argv: list[str] | None = None) -> int:
             data, next_action = _status()
         elif arguments.command == "feishu-setup":
             data, next_action = _feishu_setup()
+        elif arguments.command == "feishu-target":
+            data, next_action = _feishu_target(arguments)
+        elif arguments.command == "next":
+            data, next_action = _next_step()
         elif arguments.command == "feishu-app-secret":
             data, next_action = _feishu_app_secret(arguments)
         elif arguments.command == "daily":

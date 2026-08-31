@@ -27,6 +27,18 @@ or `--as bot`.
 
 ## Guided onboarding (feishu-setup)
 
+Two target modes are confirmed with the user before anything is written:
+- **Existing table** — the user pastes the table URL; `manage feishu-target --url <link>`
+  parses the base/table tokens, verifies read access and the real fields (read-only),
+  and saves the mapping. Nothing is created.
+- **New standard table** — the wizard shows the exact 11-field list and only creates
+  after the user confirms names and fields (one execution-policy approval).
+
+Bot identity runs the whole chain without an OAuth scan: bind app → pipe App Secret →
+`feishu-create-base --yes` (created as the bot) → the configured human manager is
+granted full access automatically. Personal identity instead uses one minimal-scope
+device authorization (Base read/write + offline_access only).
+
 `manage feishu-setup` is the single entry point for Feishu configuration. It never
 assumes prepared app information: for the current state it returns the question to
 ask the user, the exact next command, and — when no app exists yet — console
