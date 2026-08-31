@@ -1,7 +1,7 @@
 # resilient-subscription-discovery Specification
 
 ## Purpose
-Preserve useful discovery progress across subscription failures while retaining conservative stop behavior for global credential, rate-limit, network, and risk-control conditions.
+Preserve useful discovery progress across subscription failures while retaining conservative stop behavior for global credential, rate-limit, and network conditions on the paid redfox data source.
 ## Requirements
 ### Requirement: Successful account discovery is persisted incrementally
 The system SHALL add successfully discovered articles to the local queue after each subscription is processed, using existing URL identity and deduplication rules. A later subscription failure MUST NOT remove or discard articles already queued during the same run.
@@ -18,7 +18,7 @@ The system SHALL add successfully discovered articles to the local queue after e
 The system SHALL record an account diagnostic and continue when a failure is limited to one subscription, including unresolved identity, missing account identifier, or malformed article entries that can be safely skipped.
 
 #### Scenario: One subscription cannot be resolved
-- **WHEN** a subscription has no exact account match
+- **WHEN** a subscription cannot be queried (for example no WeChat alias, or the library reports no such account)
 - **THEN** that subscription is reported as unresolved and later subscriptions are still processed
 
 #### Scenario: One article entry is malformed
@@ -26,18 +26,18 @@ The system SHALL record an account diagnostic and continue when a failure is lim
 - **THEN** the invalid entry is excluded, the diagnostic records the exclusion, and other valid entries and subscriptions continue
 
 ### Requirement: Global failures stop further discovery
-The system MUST stop issuing further WeChat requests after expired credentials, invalid credential context, rate limiting, recognized risk control, or exhausted transient network retries. Successful results persisted before the stop MUST remain available.
+The system MUST stop issuing further paid API requests after rejected credentials, rate limiting, or exhausted transient network retries. Successful results persisted before the stop MUST remain available.
 
-#### Scenario: Credentials expire during discovery
-- **WHEN** WeChat reports an expired token or cookie while processing a subscription
-- **THEN** no later subscription is requested, prior successful results remain queued, and the command returns the existing credential recovery classification
+#### Scenario: Credentials are rejected during discovery
+- **WHEN** the redfox API rejects the key (REDFOX_AUTH) while processing a subscription
+- **THEN** no later subscription is requested, prior successful results remain queued, and the command returns the credential recovery classification
 
 #### Scenario: Network retries are exhausted
 - **WHEN** a transient network failure continues through the bounded retry policy
 - **THEN** discovery stops, prior successful results remain queued, and the failure is reported as run-blocking
 
 ### Requirement: Partial discovery is observable
-The system SHALL report per-account outcomes and aggregate counts for queued articles, skipped invalid entries, completed accounts, and the account that caused a run-blocking failure, without exposing credentials or token-bearing request URLs.
+The system SHALL report per-account outcomes and aggregate counts for queued articles, skipped invalid entries, completed accounts, and the account that caused a run-blocking failure, without exposing credentials or the API key.
 
 #### Scenario: Run stops after partial success
 - **WHEN** discovery stops after at least one account completed successfully

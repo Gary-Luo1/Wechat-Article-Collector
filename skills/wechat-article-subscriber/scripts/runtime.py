@@ -30,7 +30,6 @@ def _system_runtime_is_ready(command: str) -> bool:
         return True
     try:
         __import__("requests")
-        __import__("bs4")
     except ImportError:
         return False
     return True

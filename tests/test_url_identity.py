@@ -117,7 +117,7 @@ class TestUpgrade:
         assert upgrade_wechat_article_url(None) == ""
 
 
-def test_identity_module_works_without_parser_or_bs4(
+def test_identity_module_works_without_heavy_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Block the parser module so a broken install cannot hide behind it."""
@@ -125,7 +125,7 @@ def test_identity_module_works_without_parser_or_bs4(
     sys.modules.pop("url_identity", None)
 
     def block_parser(name, *args, **kwargs):
-        if name in {"article_reader", "bs4"}:
+        if name in {"bs4"}:
             raise ModuleNotFoundError(f"{name} is unavailable")
         return original_import(name, *args, **kwargs)
 

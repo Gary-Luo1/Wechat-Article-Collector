@@ -189,7 +189,7 @@ foreach ($item in $prepared) {
 }
 
 if ($NoDeps) {
-    Write-Host "Skipped dependency installation; commands other than setup require requests, beautifulsoup4, and curl_cffi in the selected Python runtime."
+    Write-Host "Skipped dependency installation; commands other than setup require requests and curl_cffi in the selected Python runtime."
 }
 if (-not (Get-Command lark-cli -ErrorAction SilentlyContinue)) {
     Write-Host "Feishu sync is disabled until @larksuite/cli is installed and authenticated."

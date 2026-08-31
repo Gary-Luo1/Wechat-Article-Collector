@@ -242,7 +242,7 @@ def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
             "supported": sys.version_info >= (3, 9),
             "dependencies": {
                 name: importlib.util.find_spec(name) is not None
-                for name in ("requests", "bs4")
+                for name in ("requests",)
             },
         },
         "paths": {
