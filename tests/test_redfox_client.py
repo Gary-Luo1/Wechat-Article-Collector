@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,12 @@ def _client(monkeypatch, responses):
     return client, session
 
 
+def _beijing_now_str() -> str:
+    """A publishTime a few minutes in the past on the Beijing clock."""
+    stamp = datetime.now(timezone(timedelta(hours=8))) - timedelta(minutes=5)
+    return stamp.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def test_missing_key_rejected():
     with pytest.raises(ValueError):
         RedfoxClient("  ")
@@ -105,7 +112,7 @@ def test_pagination_stops_at_cutoff(monkeypatch):
     page1 = [
         {"title": "new", "workUrl": "http://mp.weixin.qq.com/s?__biz=1&mid=1&idx=1&sn=aaa",
          "workUuid": "U1",
-         "publishTime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))},
+         "publishTime": _beijing_now_str()},
         {"title": "old", "workUrl": "http://mp.weixin.qq.com/s?__biz=1&mid=2&idx=1&sn=bbb",
          "workUuid": "U2",
          "publishTime": "2020-01-01 00:00:00"},
@@ -190,10 +197,9 @@ def test_all_invalid_pages_never_loop_unbounded(monkeypatch):
 
 
 def test_duplicate_pages_do_not_double_charge_items(monkeypatch):
-    import time as _t
     item = {"title": "t", "workUrl": "http://mp.weixin.qq.com/s?__biz=1&mid=1&idx=1&sn=dup",
             "workUuid": "U",
-            "publishTime": _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(_t.time()))}
+            "publishTime": _beijing_now_str()}
     client, session = _client(
         monkeypatch,
         [{"code": 2000, "data": {"list": [item] * 20}}] * 5,
