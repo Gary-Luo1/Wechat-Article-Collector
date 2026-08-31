@@ -25,6 +25,8 @@ from feishu_target import production_feishu_target
 from protocol import dump, failure, success
 from queue_helpers import (
     cache_article_content,
+    normalize_url,
+    read_queue,
     cleanup_processed,
     retire_legacy_pending,
     complete_article,
@@ -50,6 +52,15 @@ from scoring_rubric import (
 logger = logging.getLogger("wechat-process")
 
 
+class ArticleFetchPaidError(ValueError):
+    """A paid content fetch failed; keeps the REDFOX_* code for the protocol."""
+
+    def __init__(self, source: BaseException):
+        super().__init__(f"redfox content fetch failed: {source}")
+        self.code = getattr(source, "code", "REDFOX_API_ERROR")
+        self.retryable = bool(getattr(source, "retryable", False))
+
+
 class ArticleReadRequiredError(ValueError):
     """A scoreable article must have been read in a prior command invocation."""
 
@@ -63,7 +74,18 @@ class ArticleReadRequiredError(ValueError):
 
 def _resolve(arguments: argparse.Namespace) -> dict[str, Any]:
     index = arguments.index - 1 if arguments.index is not None else None
-    return resolve_pending(index=index, link=arguments.link)
+    try:
+        return resolve_pending(index=index, link=arguments.link)
+    except LookupError:
+        if arguments.link:
+            processed = read_queue()["processed"].get(normalize_url(arguments.link))
+            if processed:
+                raise LookupError(
+                    "article is already processed (sync_status="
+                    f"{processed.get('sync_status')}); use sync-feishu --link to "
+                    "re-sync it"
+                ) from None
+        raise
 
 
 def cmd_list(account: str | None = None) -> int:
@@ -224,9 +246,9 @@ def _print_article(article: dict[str, Any]) -> tuple[str, bool]:
     try:
         return _print_article_unprotected(article)
     except RedfoxAPIError as exc:
-        # Keep the protocol envelope intact for automation: the caller of
-        # main() does not catch RuntimeError subclasses.
-        raise ValueError(f"redfox content fetch failed: {exc}") from exc
+        # Keep the protocol envelope intact for automation (main() only catches
+        # ValueError subclasses) while preserving the REDFOX code/retryable.
+        raise ArticleFetchPaidError(exc) from exc
 
 
 def _print_article_unprotected(article: dict[str, Any]) -> tuple[str, bool]:
@@ -320,9 +342,14 @@ def _sync_entry(entry: dict[str, Any], *, dry_run: bool = False) -> None:
     feishu = config["feishu"]
     if not feishu["enabled"]:
         raise ConfigError("Feishu sync is disabled; complete Agent setup first")
-    production_feishu_target(feishu).sync(
+    result = production_feishu_target(feishu).sync(
         entry["article"], entry["metadata"], dry_run=dry_run
-    )
+    ) or {}
+    if result.get("skipped_fields"):
+        print(
+            "⚠ 部分字段因选项不匹配被跳过（在飞书补选项后重同步即可）："
+            + "、".join(map(str, result["skipped_fields"]))
+        )
     if not dry_run:
         update_sync_status(entry["article"]["link"], "synced")
 
@@ -422,12 +449,35 @@ def cmd_done(arguments: argparse.Namespace) -> int:
                 [exc],
                 prefix="article was saved locally but Feishu sync failed",
             )
-    print(f"Completed: {article.get('title', '')} (score {metadata['score']})")
+    if status == "skipped_low_score" and config is not None:
+        sync_note = (
+            f"未同步：{metadata['score']} 低于阈值"
+            f"（{config['settings']['min_score']}）；确需同步可加 --force-feishu 重评"
+        )
+    else:
+        sync_note = {
+            "synced": "已同步到飞书",
+            "pending": "已入同步队列",
+            "not_requested": "未请求飞书同步（加 --feishu 可同步；批量自动化需先确认执行策略）",
+            "skipped_ad": "已按广告跳过",
+        }.get(status, status)
+    print(f"Completed: {article.get('title', '')} (score {metadata['score']}) | 同步: {sync_note}")
     return 0
 
 
-def cmd_sync_all(*, dry_run: bool = False) -> int:
-    entries = pending_sync_entries()
+def cmd_sync_all(*, dry_run: bool = False, link: str | None = None) -> int:
+    if link:
+        data = read_queue()
+        entry = data["processed"].get(normalize_url(link))
+        if not entry:
+            raise LookupError("no processed article matches that URL")
+        if not dry_run and entry.get("sync_status") != "pending":
+            update_sync_status(link, "pending")
+        entries = [
+            {"article": entry["article"], "metadata": entry.get("metadata", {})}
+        ]
+    else:
+        entries = pending_sync_entries()
     if not entries:
         print("No articles are waiting for Feishu sync")
         return 0
@@ -563,7 +613,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     done_parser.add_argument("--dry-run", action="store_true")
     sync_parser = commands.add_parser("sync-feishu")
-    sync_parser.add_argument("--all", action="store_true", required=True)
+    sync_parser.add_argument("--all", action="store_true")
+    sync_parser.add_argument("--link", default="", help="re-sync one processed article by URL")
     sync_parser.add_argument("--dry-run", action="store_true")
     check_parser = commands.add_parser("feishu-check")
     check_parser.add_argument("--save-mapping", action="store_true")
@@ -605,7 +656,9 @@ def _dispatch(arguments: argparse.Namespace) -> int:
             raise ValueError("provide an index or --link")
         return cmd_done(arguments)
     if arguments.command == "sync-feishu":
-        return cmd_sync_all(dry_run=arguments.dry_run)
+        if not arguments.all and not arguments.link:
+            raise ValueError("choose --all or --link <URL>")
+        return cmd_sync_all(dry_run=arguments.dry_run, link=arguments.link or None)
     if arguments.command == "feishu-check":
         return cmd_feishu_check(save_mapping=arguments.save_mapping)
     if arguments.command == "feishu-schema":

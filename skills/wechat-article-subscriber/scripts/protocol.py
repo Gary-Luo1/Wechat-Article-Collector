@@ -23,6 +23,8 @@ NEXT_ACTIONS = {
     "LARK_FIELD_MAPPING": "inspect_and_confirm_field_mapping",
     "LARK_WRONG_APP": "select_expected_lark_profile",
     "LARK_CONFIRMATION_REQUIRED": "ask_user_for_explicit_confirmation",
+    "LARK_DUPLICATE": "treat_as_already_done",
+    "LARK_CONFIG": "inspect_command_help",
     "LARK_TRANSIENT": "retry_with_backoff",
     "INTERNAL_ERROR": "report_redacted_diagnostics",
 }

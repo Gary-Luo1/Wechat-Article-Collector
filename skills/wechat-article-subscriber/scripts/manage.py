@@ -19,6 +19,7 @@ from typing import Any
 from article_inbox import queue_summary
 from bitable_client import (
     LarkCLIError,
+    _run_lark,
     create_standard_base,
     probe_app_secret_resolution,
     created_base_identifiers,
@@ -80,6 +81,19 @@ ACTION_LABELS = {
     "run_redfox_key_setup": "通过 stdin 设置 redfox API Key",
     "confirm_daily_run": "确认以上计划后加 --yes 执行每日发现与简报",
     "collect_redfox_key": "提供 redfox API Key（stdin 或对话内提供皆可）",
+    "rerun_with_yes": "预览无误后加 --yes 执行",
+    "run_feishu_validation": "运行飞书只读校验",
+    "select_or_initialize_feishu_profile": "选择或初始化技能私有的 lark-cli 配置",
+    "reuse_existing_user_authorization_and_confirm_context": "复用现有个人授权并确认上下文",
+    "configure_bot_credentials_and_scopes_without_user_auth": "检查机器人凭据与权限（无需扫码）",
+    "confirm_feishu_app_and_bot": "确认飞书应用与机器人身份",
+    "confirm_feishu_app_and_user": "确认飞书应用与个人身份",
+    "start_single_user_base_authorization": "发起一次最小权限扫码授权",
+    "finish_existing_user_base_authorization": "完成等待中的扫码授权",
+    "continue_resource_provisioning": "继续被批准的资源创建",
+    "read_score_digest_candidates": "阅读并评分简报候选文章",
+    "generate_digest_plan": "生成文章简报计划",
+    "treat_as_already_done": "目标已存在，视为完成",
     "ask_user_for_search_window": "选择文章搜索时间范围",
     "ask_for_subscription_names": "添加至少一个公众号",
     "edit_subscriptions_add_alias": "为缺少微信号的订阅补充 alias（广域库仅认微信号）",
@@ -90,7 +104,6 @@ ACTION_LABELS = {
     "ask_feishu_identity_before_authorization": "选择个人用户或机器人身份",
     "run_feishu_auth_start": "检查现有飞书授权；仅在缺失时发起一次授权",
     "resume_existing_user_base_authorization": "继续当前飞书授权，不要重新发起",
-    "check_or_install_lark_cli": "检查或安装兼容的飞书 CLI",
     "ask_user_for_feishu_setup_choice": "本地未发现 lark-cli 或应用配置：询问用户如何继续（安装 / 提供应用信息 / 跳过飞书），不扩大检索范围",
     "install_compatible_lark_cli": "安装兼容的飞书 CLI 版本",
     "authorize_and_run_feishu_check": "完成飞书只读检查",
@@ -100,7 +113,6 @@ ACTION_LABELS = {
     "provide_app_secret_for_private_profile": "从飞书开放平台复制 App Secret 并经 stdin 初始化私有配置",
     "provision_configured_feishu_base": "自动创建并验证已批准的飞书多维表格",
     "configure_existing_feishu_target": "配置一个明确的现有飞书目标表格",
-    "rerun_with_yes_or_update_execution_policy": "确认本次创建，或更新一次性自动执行范围",
     "continue_setup_then_execute": "继续完成配置并自动执行任务",
     "discover_articles": "发现并查看新文章",
 }
@@ -838,9 +850,10 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
     guide = {
         "create_app_url": "https://open.feishu.cn/app?lang=zh-CN",
         "create_app_steps": [
-            "在飞书开放平台创建一个企业自建应用（名字随意，例如 文章订阅同步）。",
-            "在应用后台 权限管理 开通多维表格权限（base:app、base:table、base:record、base:field 的读写）。",
-            "发布应用版本，然后从 凭证与基础信息 复制 App ID 和 App Secret。",
+            "个人账号需先拥有一个飞书团队/企业（免费创建即可），然后在开放平台创建企业自建应用。",
+            "在 权限管理 搜索并勾选多维表格相关权限（控制台以中文名展示，例如「查看、评论、编辑和管理多维表格」及其子项，覆盖表格/字段/记录的读写）。",
+            "在 可用范围 里把自己加入应用可用人员，否则授权与写入会被拒绝。",
+            "发布应用版本；发布后从 凭证与基础信息 复制 App ID 和 App Secret。",
         ],
     }
     if not state["identity_confirmed"]:
@@ -863,18 +876,31 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
         )
         return state, "reuse_or_configure_private_lark_profile"
     if feishu["identity"] == "bot" and not config["feishu"]["manager_open_id"]:
+        known_user = ""
+        try:
+            known_user = _authorized_user_open_id()
+        except Exception:
+            known_user = ""
         state.update(
             next_question=(
-                "bot 身份不需要扫码授权。请提供接收管理权限的飞书 Open ID"
-                "（曾用个人身份授权过的话我可自动读取）。"
+                "bot 身份不需要扫码授权。需要一位接收管理权限的飞书用户："
+                + (
+                    f"检测到曾授权的用户（{known_user[:12]}…），可直接采用。"
+                    if known_user
+                    else "请提供接收人的飞书 Open ID（个人版可在开放平台应用的『用户 ID 查询』工具获取）。"
+                )
             ),
-            next_command="manage feishu-manager --open-id <OPEN_ID>",
+            next_command=(
+                "manage feishu-manager --from-authorized-user"
+                if known_user
+                else "manage feishu-manager --open-id <OPEN_ID>"
+            ),
         )
         return state, "resolve_and_save_feishu_manager"
     if feishu["identity"] == "user" and state["authorization"] != "authorized":
         state.update(
             next_question="应用已绑定但密钥/授权未就绪：请提供 App Secret（stdin），随后完成一次扫码授权。",
-            next_command=(
+            next_command=_pipe_cmd(
                 f"printf %s '<APP_SECRET>' | manage feishu-app-secret --app-id {app_id}"
             ),
             then="manage feishu-auth start（扫码后 feishu-auth complete）",
@@ -906,11 +932,11 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
                 "manage execution-policy set --mode autopilot --feishu-provisioning allow "
                 "--base-name <名称> --table-name <表名> --feishu-sync allow --yes → "
                 "manage feishu-create-base --name <名称> --table-name <表名> --yes"
-                + (
-                    " → printf %s '<BASE_TOKEN>' | manage feishu-grant-manager --type bitable --token-stdin"
-                    if feishu["identity"] == "bot"
-                    else ""
-                )
+                "（bot 身份会自动把管理权限授予已配置的管理员，无需再执行 grant-manager）"
+                if feishu["identity"] == "bot"
+                else "manage execution-policy set --mode autopilot --feishu-provisioning allow "
+                "--base-name <名称> --table-name <表名> --feishu-sync allow --yes → "
+                "manage feishu-create-base --name <名称> --table-name <表名> --yes"
             ),
         )
         return state, "provision_configured_feishu_base"
@@ -1075,7 +1101,14 @@ def _feishu_grant_manager(arguments: argparse.Namespace) -> tuple[dict[str, Any]
     resource_token = sys.stdin.read().strip()
     if not resource_token:
         raise ValueError("resource token is required on stdin")
-    grant_bot_created_resource(resource_token, arguments.resource_type, manager_open_id)
+    try:
+        grant_bot_created_resource(resource_token, arguments.resource_type, manager_open_id)
+    except LarkCLIError as exc:
+        if exc.kind != "duplicate":
+            raise
+        # Re-running the same grant reports the manager as already present;
+        # treat that as success for parity with the automatic provisioning path.
+    
     return {
         "resource_type": arguments.resource_type,
         "permission": "full_access",
@@ -1243,6 +1276,15 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
             "persisted_execution_policy" if policy_authorized else "current_command"
         ),
     }, "none"
+
+
+def _authorized_user_open_id() -> str:
+    """Read the authorized user's Open ID from the isolated lark-cli state."""
+    payload = _run_lark(["auth", "status", "--json"], retries=1)
+    auth = payload.get("data", payload) if isinstance(payload, dict) else {}
+    identities = auth.get("identities", {}) if isinstance(auth, dict) else {}
+    user = identities.get("user", {}) if isinstance(identities, dict) else {}
+    return str(user.get("openId") or "").strip()
 
 
 def _feishu_manager(open_id: str) -> dict[str, Any]:
@@ -1493,11 +1535,14 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     from discover_only import discover_articles
 
     config = load_config()
+    from discover_only import _subscription_cooldown_active
+
+    interval = float(config["settings"]["check_hours"])
     subscriptions = [
         {
             "name": str(item.get("name", "")).strip(),
             "alias": str(item.get("alias", "")).strip(),
-            "cooldown_active": bool(item.get("last_discovered_at")),
+            "cooldown_active": _subscription_cooldown_active(item, interval),
         }
         for item in config["subscriptions"]
     ]
@@ -1565,11 +1610,18 @@ def _next_step() -> tuple[dict[str, Any], str]:
     """
     try:
         config = load_config()
-    except ConfigError:
+    except ConfigError as exc:
+        if config_path().exists():
+            return {
+                "stage": "config_invalid",
+                "question": f"本地配置损坏：{exc}。需要修复或重置（manage reset 可预览）。",
+                "command": "manage doctor",
+                "paid": False,
+            }, "repair_local_config_file"
         return {
             "stage": "fresh_install",
             "question": "请提供 redfox API key（在 https://redfox.hk/ 控制台创建；也可自己执行 printf 管道命令以避免聊天留存）",
-            "command": "printf %s '<KEY>' | manage redfox-set-key",
+            "command": _pipe_cmd("printf %s '<KEY>' | manage redfox-set-key"),
             "paid": False,
         }, "collect_redfox_key"
 
@@ -1577,7 +1629,7 @@ def _next_step() -> tuple[dict[str, Any], str]:
         return {
             "stage": "redfox_key_missing",
             "question": "redfox API key 缺失：请在 https://redfox.hk/ 控制台创建后提供。",
-            "command": "printf %s '<KEY>' | manage redfox-set-key",
+            "command": _pipe_cmd("printf %s '<KEY>' | manage redfox-set-key"),
             "paid": False,
         }, "collect_redfox_key"
 
@@ -1590,7 +1642,7 @@ def _next_step() -> tuple[dict[str, Any], str]:
     questions: dict[str, tuple[str, str, bool]] = {
         "search_window_unconfirmed": (
             "每次拉多久以内的文章？24 小时（推荐）/ 48 小时 / 7 天 / 自定义",
-            "printf %s '{\"check_hours\":24}' | setup --agent-stdin --section settings",
+            _pipe_cmd("printf %s '{\"check_hours\":24}' | setup --agent-stdin --section settings"),
             False,
         ),
         "subscriptions_missing": (
@@ -1599,8 +1651,8 @@ def _next_step() -> tuple[dict[str, Any], str]:
             "名称模式 1 次调用/个",
         ),
         "subscriptions_unresolved": (
-            "有订阅缺少微信号（数据源只认微信号）：请补充对应 alias，或改用名称解析。",
-            "manage subscriptions add --name <名称> --alias <微信号>",
+            "有订阅缺少微信号（数据源只认微信号）：为现有订阅补 alias 用 set-alias，新订阅直接带 alias 添加。",
+            "manage subscriptions set-alias --name <名称或旧alias> --alias <微信号>",
             False,
         ),
         "feishu_destination_unconfirmed": (
@@ -1619,8 +1671,11 @@ def _next_step() -> tuple[dict[str, Any], str]:
             "manage feishu-setup", False),
         "feishu_authorization_waiting": ("上一次扫码授权还在等待：请完成页面确认或重新发起。",
             "manage feishu-setup", False),
-        "feishu_manager_missing": ("机器人创建的资源需要一位管理员接收权限：请提供你的飞书 Open ID。",
-            "manage feishu-manager --open-id <OPEN_ID>", False),
+        "feishu_manager_missing": (
+            "bot 模式需要一位接收管理权限的飞书用户：优先用曾授权的个人身份导入（免输入），否则提供 Open ID。",
+            "manage feishu-manager --from-authorized-user（或 --open-id <OPEN_ID>）",
+            False,
+        ),
         "feishu_target_pending": ("已批准建表：确认字段清单后将自动创建标准文章表。",
             "manage feishu-create-base --name <已批准名> --table-name <已批准名> --yes", False),
         "feishu_target_missing": ("请提供目标表格：飞书表格链接（manage feishu-target --url <链接>）或按引导新建。",
@@ -1642,7 +1697,7 @@ def _next_step() -> tuple[dict[str, Any], str]:
             "ready": True,
         }, "confirm_daily_run"
     question, command, paid = questions.get(
-        stage, (None, "manage doctor --online", "1 次计费探测")
+        stage, (None, "manage status", False)
     )
     return {
         "stage": stage,
@@ -1693,7 +1748,36 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
             in " ".join(str(item.get(key, "")) for key in ("name", "alias", "biz")).casefold()
         ]
         return {"subscriptions": selected, "count": len(selected), "total": len(items)}
+    if arguments.subscription_command == "set-alias":
+        alias = str(arguments.alias or "").strip()
+        if not alias:
+            raise ValueError("--alias is required")
+        selector = str(arguments.name or "").strip()
+
+        def mutate_alias(config: dict[str, Any]) -> dict[str, Any]:
+            matches = [
+                item
+                for item in config["subscriptions"]
+                if selector
+                and selector.casefold()
+                in (
+                    str(item.get("name", "")).strip().casefold(),
+                    str(item.get("alias", "")).strip().casefold(),
+                )
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"expected exactly one subscription matching {selector!r}; "
+                    f"found {len(matches)}"
+                )
+            matches[0]["alias"] = alias
+            return config
+
+        saved = modify_config(mutate_alias)
+        return {"subscriptions": saved["subscriptions"]}
+
     if arguments.subscription_command == "add":
+        _pending_resolution_billing = not (arguments.alias or "").strip()
         candidate = {
             key: value.strip()
             for key, value in {"name": arguments.name, "alias": arguments.alias, "biz": arguments.biz}.items()
@@ -1728,7 +1812,11 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
             return config
 
         modify_config(mutate_add)
-        return {"added": candidate, "count": state["count"]}
+        result = {"added": candidate, "count": state["count"]}
+        if _pending_resolution_billing:
+            result["billed_calls"] = 1
+            result["billed_note"] = "1 paid account-search call was used to resolve the name"
+        return result
     if arguments.subscription_command == "bulk-add":
         candidates: list[Any] = list(arguments.name or [])
         if arguments.file:
@@ -1900,6 +1988,17 @@ def _preferences(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     return {"preferences": saved["preferences"], "updated_fields": sorted(updates)}, "generate_digest_plan"
 
 
+def _pipe_cmd(template: str) -> str:
+    """Render a `printf %s '<...>' | cmd` template for the current shell.
+
+    Native PowerShell has no printf; there the plain pipeline form works for
+    ASCII secrets (non-ASCII values should use the agent-file inbox instead).
+    """
+    if os.name == "nt":
+        return template.replace("printf %s '", "'").replace("' | ", "' | ")
+    return template
+
+
 def _key_tail(api_key: str) -> str:
     """Last four characters only; empty for keys too short to be identifiable."""
     return api_key[-4:] if len(api_key) >= 8 else ""
@@ -1986,6 +2085,7 @@ def _redfox_status(*, verify: bool = False) -> tuple[dict[str, Any], str]:
     if api_key and verify:
         # One paid call; only on explicit request.
         data.update(_probe_redfox(api_key))
+        data["billed"] = 1
     elif api_key:
         data["reachable"] = None  # not checked; pass --verify for a live probe
     else:
@@ -2157,7 +2257,12 @@ def build_parser() -> argparse.ArgumentParser:
     import_profile = local_profile_commands.add_parser("import")
     import_profile.add_argument("--yes", action="store_true")
     manager = commands.add_parser("feishu-manager")
-    manager.add_argument("--open-id", required=True)
+    manager.add_argument("--open-id", default="")
+    manager.add_argument(
+        "--from-authorized-user",
+        action="store_true",
+        help="import the Open ID of the previously authorized personal-identity user",
+    )
     grant_manager = commands.add_parser("feishu-grant-manager")
     grant_manager.add_argument(
         "--token-stdin",
@@ -2186,6 +2291,9 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = subs.add_subparsers(dest="subscription_command", required=True)
     list_subscriptions = subcommands.add_parser("list")
     list_subscriptions.add_argument("--query", default="")
+    set_alias = subcommands.add_parser("set-alias")
+    set_alias.add_argument("--name", default="", help="subscription name or current alias")
+    set_alias.add_argument("--alias", default="", help="the WeChat alias to store")
     add = subcommands.add_parser("add")
     add.add_argument("--name", default="")
     add.add_argument(
@@ -2264,7 +2372,15 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "feishu-local-profile":
             data, next_action = _feishu_local_profile(arguments)
         elif arguments.command == "feishu-manager":
-            data = _feishu_manager(arguments.open_id)
+            open_id = arguments.open_id or ""
+            if arguments.from_authorized_user:
+                open_id = _authorized_user_open_id()
+                if not open_id:
+                    raise ValueError(
+                        "no authorized personal-identity user found; run a user "
+                        "authorization first or pass --open-id"
+                    )
+            data = _feishu_manager(open_id)
             next_action = "confirm_feishu_app_and_bot"
         elif arguments.command == "feishu-grant-manager":
             data, next_action = _feishu_grant_manager(arguments)

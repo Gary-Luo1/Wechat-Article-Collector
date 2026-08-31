@@ -99,9 +99,9 @@ def next_stage(
     if destination == "undecided":
         return "feishu_destination_unconfirmed", "ask_user_for_feishu_destination"
     policy = policy_for(config)
-    if not policy["confirmed"]:
-        return "execution_policy_unconfirmed", "review_and_confirm_execution_policy"
     if destination == "skip":
+        if not policy["confirmed"]:
+            return "execution_policy_unconfirmed", "review_and_confirm_execution_policy"
         return "ready_wechat_only", "discover_articles"
     if not config["setup"]["feishu_identity_confirmed"]:
         return "feishu_identity_unconfirmed", "ask_feishu_identity_before_authorization"
@@ -132,4 +132,9 @@ def next_stage(
         return "feishu_validation_failed", "authorize_and_run_feishu_check"
     if not feishu_health["last_verified_at"]:
         return "feishu_unverified", "authorize_and_run_feishu_check"
+    # The policy is confirmed LAST for Feishu destinations: every identity,
+    # app, manager, or target edit above invalidates it, so confirming earlier
+    # would force the user through a second approval after Feishu setup.
+    if not policy["confirmed"]:
+        return "execution_policy_unconfirmed", "review_and_confirm_execution_policy"
     return "ready", "discover_articles"

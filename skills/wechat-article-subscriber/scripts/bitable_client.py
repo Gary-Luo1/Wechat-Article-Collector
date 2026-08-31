@@ -168,8 +168,12 @@ def _lark_cli() -> str:
         return str(resolve_lark_cli())
     except FileNotFoundError as exc:
         raise LarkCLIError(
-            "lark-cli is not installed. Ask for permission, then install @larksuite/cli "
-            "in the application state directory and resume Feishu setup.",
+            "lark-cli is not installed. Prerequisite: Node.js 18+ (nodejs.org or "
+            "`brew install node`). Then install into the Skill's isolated directory: "
+            "`npm install --prefix <doctor paths.data_dir>/lark-cli @larksuite/cli` "
+            "(if npm ignores install scripts, also run `npm approve-scripts "
+            "@larksuite/cli` in that directory so the native binary is downloaded). "
+            "After installing, rerun `manage doctor` to confirm detection.",
             kind="missing_cli",
         ) from exc
 
@@ -261,6 +265,8 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
         console_url = str(payload.get("console_url") or "").strip()
         subtype = str(payload.get("subtype", ""))
         permission_violations = payload.get("permission_violations")
+    code_text = f"[code {code}] " if str(code) not in ("", "None") else ""
+    message = code_text + message
     violations_text = (
         json.dumps(permission_violations, ensure_ascii=False)
         if permission_violations
@@ -305,7 +311,11 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
             "missing scope",
         )
     ):
-        guidance = "Feishu user authorization or app scope is missing. Request only the base domain"
+        guidance = (
+            "Feishu authorization or app scope is missing (bot identity: check the "
+            "App Secret via manage feishu-app-secret and the app's Base permissions "
+            "in the console - do not run user auth). Request only the base domain"
+        )
         if console_url:
             guidance += f" and open the developer-console link: {console_url}"
         elif hint:
@@ -478,10 +488,28 @@ def _items(payload: dict[str, Any]) -> list[dict[str, Any]]:
         return [item for item in data if isinstance(item, dict)]
     if not isinstance(data, dict):
         return []
-    for key in ("items", "fields", "records", "tables"):
+    for key in ("items", "records", "tables"):
         value = data.get(key)
-        if isinstance(value, list):
+        if isinstance(value, list) and any(isinstance(item, dict) for item in value):
             return [item for item in value if isinstance(item, dict)]
+    value = data.get("fields")
+    if isinstance(value, list) and any(isinstance(item, dict) for item in value):
+        return [item for item in value if isinstance(item, dict)]
+    # lark-cli >= 1.0.9x table mode: rows live in data.data with parallel
+    # record_id_list (no per-record objects). Rebuild dict rows so callers
+    # keep a uniform shape.
+    rows = data.get("data")
+    record_ids = data.get("record_id_list")
+    field_names = data.get("fields")
+    if isinstance(rows, list) and isinstance(record_ids, list):
+        return [
+            {
+                "record_id": record_ids[index],
+                "fields": dict(zip(field_names or [], row)) if isinstance(row, list) else row,
+            }
+            for index, row in enumerate(rows)
+            if index < len(record_ids)
+        ]
     return []
 
 
@@ -686,10 +714,14 @@ def _field_multiple(field: dict[str, Any]) -> bool:
 
 
 def build_mapped_record(
-    article: dict[str, Any], metadata: dict[str, Any], mapping: dict[str, dict[str, Any]]
-) -> dict[str, Any]:
+    article: dict[str, Any],
+    metadata: dict[str, Any],
+    mapping: dict[str, dict[str, Any]],
+) -> "tuple[dict[str, Any], list[str]]":
+    """Return (record, skipped_fields) so callers can surface silent drops."""
     logical = _logical_record(article, metadata)
     record: dict[str, Any] = {}
+    skipped: list[str] = []
     for key, target in mapping.items():
         value = logical[key]
         actual_type = target["type"]
@@ -698,6 +730,7 @@ def build_mapped_record(
             if actual_type == "select":
                 options = _select_options(raw)
                 if not options or not set(value).issubset(options):
+                    skipped.append(target["name"])
                     continue
                 multiple = _field_multiple(raw)
                 value = value if multiple else (value[0] if value else None)
@@ -706,10 +739,11 @@ def build_mapped_record(
         elif actual_type == "select":
             options = _select_options(raw)
             if not options or str(value) not in options:
+                skipped.append(target["name"])
                 continue
         field_key = target["field_id"] or target["name"]
         record[field_key] = value
-    return record
+    return record, skipped
 
 
 def find_record_by_url(
@@ -1147,20 +1181,30 @@ def upsert_article(
     metadata: dict[str, Any],
     *,
     dry_run: bool = False,
-) -> None:
+) -> dict[str, Any]:
     check = preflight_feishu(feishu)
     mapping = check["resolved"]
-    record = build_mapped_record(article, metadata, mapping)
+    record, skipped_fields = build_mapped_record(article, metadata, mapping)
     url_target = mapping["url"]
     url_field = url_target["field_id"] or url_target["name"]
     identity = check["identity"]
+    # Match by the field NAME (stable inside one table) instead of the raw
+    # field_id: lark-cli record filters accept names, and saved mappings may
+    # carry ids that the filter endpoint does not resolve.
     record_id = find_record_by_url(
         feishu["base_token"],
         feishu["table_id"],
         str(record[url_field]),
-        url_field,
+        url_target["name"],
         identity=identity,
     )
+    if record_id:
+        # Updates must not clobber human-curated cells: 阅读状态 and 抓取时间
+        # are only written on first creation.
+        for logical in ("read_status", "fetched_at"):
+            target = mapping.get(logical)
+            if target:
+                record.pop(target["field_id"] or target["name"], None)
     args = [
         "base",
         "+record-upsert",
@@ -1180,3 +1224,7 @@ def upsert_article(
     if dry_run:
         args.append("--dry-run")
     _run_lark(args)
+    return {
+        "updated": bool(record_id),
+        "skipped_fields": skipped_fields,
+    }

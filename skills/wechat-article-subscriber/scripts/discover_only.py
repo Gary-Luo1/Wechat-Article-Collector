@@ -62,6 +62,7 @@ def discover_articles(
     config_path: Path | None = None,
     diagnostics: list[dict] | None = None,
     on_account_articles: Callable[[list[dict]], int] | None = None,
+    force: bool = False,
 ) -> list[dict]:
     """Discover articles through the paid redfox API (billing-aware)."""
     api_key = config["redfox"]["api_key"].strip()
@@ -101,7 +102,7 @@ def discover_articles(
                     if diagnostics is not None:
                         diagnostics.append(diagnostic)
                     continue
-                if _subscription_cooldown_active(subscription, interval_hours):
+                if not force and _subscription_cooldown_active(subscription, interval_hours):
                     diagnostic["status"] = "ok"
                     diagnostic["skipped_cooldown"] = 1
                     if diagnostics is not None:
@@ -175,6 +176,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--hours", type=float)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="bypass per-subscription cooldowns (billed list calls are made again)",
+    )
     parser.add_argument("--format", choices=("text", "json"), default="text")
     arguments = parser.parse_args(argv)
     json_output = arguments.format == "json"
@@ -232,10 +238,12 @@ def main(argv: list[str] | None = None) -> int:
             arguments.config,
             diagnostics,
             persist_account,
+            force=arguments.force,
         )
         cleanup_processed()
         data = {
             "hours": hours,
+            "forced": bool(arguments.force),
             "discovered": len(articles),
             "queued": queued,
             "accounts": diagnostics,

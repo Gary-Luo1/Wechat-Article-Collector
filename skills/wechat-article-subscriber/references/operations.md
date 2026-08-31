@@ -16,7 +16,7 @@ bash scripts/run.sh manage status
 bash scripts/run.sh manage config-show
 ```
 
-`doctor` reports runtime/dependency availability, redacted configuration, queue counts, lark-cli compatibility, health history, `setup_stage`, and `next_action`. Offline mode performs no network calls. Online mode validates WeChat, resolves subscription candidates, and runs the read-only Feishu preflight when enabled. Add `--save-resolved` only after exact results have been shown or confirmed.
+`doctor` reports runtime/dependency availability, redacted configuration, queue counts, lark-cli compatibility, health history, `setup_stage`, and `next_action`. Offline mode performs no network calls. Online mode probes the redfox key (1 billed call) and runs the read-only Feishu preflight when enabled.
 
 `status` is the compact user-facing view. It returns a percentage, completed/current/
 pending/optional steps, a localized next-action label, queue counts, warnings, and
@@ -84,8 +84,6 @@ manage subscriptions add --name <EXACT_NAME>
 manage subscriptions bulk-add --name <NAME> --name <NAME> --dry-run
 manage subscriptions bulk-add --file <NAMES.txt-or-JSON> --dry-run
 manage subscriptions remove <NAME_OR_ALIAS_OR_BIZ>
-discover --resolve-subscriptions --format json
-discover --resolve-subscriptions --save-resolved --format json
 ```
 
 Ambiguous search results require user choice. A missing result is not silently removed.
