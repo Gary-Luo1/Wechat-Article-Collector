@@ -19,6 +19,7 @@ from redfox_client import (  # noqa: E402
     RedfoxClient,
     RedfoxRateLimitError,
     clean_content,
+    sanitize_text,
     strip_html_to_text,
 )
 
@@ -249,3 +250,9 @@ def test_plain_text_with_angle_brackets_untouched():
 
 def test_unclosed_script_block_dropped():
     assert strip_html_to_text("<p>正文</p><script>var x=1;") == "正文"
+
+
+def test_sanitize_text_lone_cr_separates_words():
+    assert sanitize_text("word1\rword2", 100) == "word1 word2"
+    assert sanitize_text("line1\r\nline2", 100) == "line1 line2"
+    assert sanitize_text("plain text", 100) == "plain text"

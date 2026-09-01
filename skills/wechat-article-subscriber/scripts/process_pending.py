@@ -298,7 +298,9 @@ def cmd_batch_read(limit: int) -> int:
         try:
             _print_article(article)
             successful += 1
-        except (ValueError, ConfigError) as exc:
+        except (ValueError, LookupError, ConfigError) as exc:
+            # LookupError: the article left the pending list mid-batch (another
+            # process completed or dismissed it); keep the batch going.
             failures += 1
             print(f"[Article read failed: {exc}]")
     if len(pending) > limit:
@@ -444,14 +446,13 @@ def cmd_done(arguments: argparse.Namespace) -> int:
         print(f"Dry run succeeded; article remains pending: {article.get('title', '')}")
         return 0
     entry = complete_article(article["link"], metadata, sync_status=status)
-    if entry.get("metadata", {}).get("disposition") == "dismissed":
-        raise LookupError("article was dismissed and cannot be completed")
     if status == "pending":
+        # complete_article itself refuses dismissed entries atomically, so a
+        # race with dismiss surfaces as a LookupError from that call instead.
         try:
-            _sync_entry(entry, dry_run=arguments.dry_run)
+            _sync_entry(entry)
         except (ConfigError, KeyError, LarkCLIError, ValueError) as exc:
-            if not arguments.dry_run:
-                update_sync_status(article["link"], "pending", str(exc))
+            update_sync_status(article["link"], "pending", str(exc))
             _raise_sync_failures(
                 [exc],
                 prefix="article was saved locally but Feishu sync failed",
@@ -669,6 +670,8 @@ def _dispatch(arguments: argparse.Namespace) -> int:
             raise ValueError("provide an index or --link")
         return cmd_done(arguments)
     if arguments.command == "sync-feishu":
+        if arguments.all and arguments.link:
+            raise ValueError("choose either --all or --link <URL>, not both")
         if not arguments.all and not arguments.link:
             raise ValueError("choose --all or --link <URL>")
         return cmd_sync_all(dry_run=arguments.dry_run, link=arguments.link or None)
@@ -689,14 +692,14 @@ def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     json_output = arguments.format == "json"
     output = io.StringIO()
-    retired = retire_legacy_pending()
-    if retired:
-        logger.info(
-            "retired %d pre-redfox queue entr%s (no body and no work_uuid)",
-            retired,
-            "y" if retired == 1 else "ies",
-        )
     try:
+        retired = retire_legacy_pending()
+        if retired:
+            logger.info(
+                "retired %d pre-redfox queue entr%s (no body and no work_uuid)",
+                retired,
+                "y" if retired == 1 else "ies",
+            )
         with contextlib.redirect_stdout(output) if json_output else contextlib.nullcontext():
             result = _dispatch(arguments)
         if json_output:
@@ -739,6 +742,14 @@ def main(argv: list[str] | None = None) -> int:
             print(dump(failure(exc)))
         else:
             logger.error("%s", exc)
+        return 1
+    except Exception as exc:
+        # Unexpected failures (corrupt queue, lock timeout, OS errors) must
+        # still produce a protocol envelope instead of a raw traceback.
+        if json_output:
+            print(dump(failure(exc)))
+        else:
+            logger.exception("unexpected failure in %s", arguments.command)
         return 1
 
 

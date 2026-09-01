@@ -63,8 +63,10 @@ _UNCLOSED_SCRIPT = re.compile(r"<(script|style)\b[^>]*>.*\Z", re.IGNORECASE | re
 def sanitize_text(value: Any, limit: int) -> str:
     """Truncate and strip unsafe characters from one untrusted API string."""
     text = _UNICODE_TAGS.sub("", _CONTROL_CHARS.sub("", str(value or "")))
-    text = " ".join(text.split("\n")) if "\r" in text else text
-    text = text.replace("\r", "")
+    if "\r" in text:
+        # Normalize every CR variant to \n first so a lone \r separates words
+        # instead of being deleted and gluing them together.
+        text = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
     return text.strip()[:limit]
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 from typing import Any
 
@@ -21,9 +21,14 @@ def _timestamp(item: dict[str, Any]) -> float:
         value = item.get(key) or article.get(key)
         if value:
             try:
-                return datetime.fromisoformat(str(value)).timestamp()
+                parsed = datetime.fromisoformat(str(value))
             except ValueError:
                 continue
+            # Hand-written queue entries may lack an offset; treat them as UTC
+            # like every timestamp this project writes itself.
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
     return 0
 
 

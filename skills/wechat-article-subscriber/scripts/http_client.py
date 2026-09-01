@@ -8,6 +8,8 @@ runtimes working.
 from __future__ import annotations
 
 
+from typing import Any
+
 import requests
 
 try:
@@ -40,8 +42,12 @@ _FALLBACK_USER_AGENT = (
 )
 
 
-def new_session(headers: dict[str, str] | None = None) -> requests.Session:
-    """Create a Chrome-impersonating session (or requests fallback) with headers."""
+def new_session(headers: dict[str, str] | None = None) -> Any:
+    """Create a Chrome-impersonating session (or requests fallback) with headers.
+
+    The curl_cffi session is duck-type compatible with requests.Session but is
+    not a subclass, so the return type is deliberately Any.
+    """
     session = (
         curl_requests.Session(impersonate="chrome")
         if CURL_CFFI_AVAILABLE

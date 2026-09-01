@@ -292,6 +292,14 @@ class TestQueue:
         assert [item["title"] for item in queue["pending"]] == ["Article b"]
         assert next(iter(queue["processed"].values()))["metadata"]["score"] == 8
 
+    def test_update_sync_status_refuses_dismissed_entries(self):
+        from queue_helpers import add_pending, dismiss_article, update_sync_status
+
+        add_pending([article("a")])
+        dismiss_article(article("a")["link"])
+        with pytest.raises(ValueError, match="dismissed"):
+            update_sync_status(article("a")["link"], "pending")
+
     def test_pending_sync_survives_cleanup(self):
         from queue_helpers import add_pending, cleanup_processed, complete_article, pending_sync_entries
 
@@ -419,6 +427,15 @@ class TestScoring:
 
         with pytest.raises(ValueError):
             validate_total_score(11)
+
+    def test_total_score_rounds_half_up_like_calculate_score(self):
+        from scoring_rubric import calculate_score, validate_total_score
+
+        assert validate_total_score(8.25) == 8.3
+        scores = self.scores()
+        scores["技术深度"] = 8.25
+        computed = calculate_score(scores)
+        assert validate_total_score(computed) == computed
 
     def test_ad_heuristic_uses_disclosure_not_generic_word(self):
         from scoring_rubric import is_advertisement
@@ -892,6 +909,52 @@ class TestProcess:
         assert main(["done", "--link", article("a")["link"], "--dims", self.dims()]) == 0
         processed = next(iter(read_queue()["processed"].values()))
         assert processed["sync_status"] == "not_requested"
+
+    def test_corrupt_queue_still_produces_json_envelope(self, capsys):
+        from paths import queue_path
+        from process_pending import main
+
+        queue_path().parent.mkdir(parents=True, exist_ok=True)
+        queue_path().write_text("{not json", encoding="utf-8")
+        assert main(["--format", "json", "list"]) == 1
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "INVALID_ARGUMENT"
+
+    def test_sync_feishu_rejects_all_and_link_together(self):
+        from process_pending import main
+
+        assert (
+            main(
+                [
+                    "sync-feishu",
+                    "--all",
+                    "--link",
+                    "https://mp.weixin.qq.com/s/a",
+                ]
+            )
+            == 1
+        )
+
+    def test_batch_read_continues_when_article_leaves_queue_mid_batch(
+        self, monkeypatch, capsys
+    ):
+        import process_pending
+        from queue_helpers import add_pending
+
+        self.valid_config()
+        add_pending([article("a"), article("b")])
+        monkeypatch.setattr(
+            process_pending,
+            "record_verified_read",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                LookupError("article is no longer pending")
+            ),
+        )
+        assert process_pending.main(["batch-read"]) == 1
+        output = capsys.readouterr().out
+        assert "ARTICLE 1/2" in output
+        assert "ARTICLE 2/2" in output
 
     def test_read_records_proof_then_allows_completion(self):
         import process_pending

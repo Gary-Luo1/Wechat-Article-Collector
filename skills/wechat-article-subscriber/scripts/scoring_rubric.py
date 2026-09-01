@@ -60,7 +60,9 @@ def validate_total_score(score: float) -> float:
     value = float(score)
     if not 1 <= value <= 10:
         raise ValueError("score must be between 1 and 10")
-    return round(value, 1)
+    # Same rounding as calculate_score so a threshold comparison never sees a
+    # different one-decimal value than the one that was computed.
+    return float(Decimal(str(value)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
 
 
 def format_rationale(scores: Mapping[str, float]) -> str:

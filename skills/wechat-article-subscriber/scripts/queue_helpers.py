@@ -429,6 +429,14 @@ def update_sync_status(link: str, status: str, error: str = "") -> None:
         entry = data["processed"].get(normalized)
         if not entry:
             raise LookupError("processed article not found")
+        disposition = (entry.get("metadata") or {}).get("disposition")
+        if disposition in {"dismissed", "legacy_unreadable"}:
+            # Closes the race where an entry is dismissed after the caller's
+            # own disposition check but before this locked write; syncing such
+            # an entry would push score-less data to Feishu.
+            raise ValueError(
+                f"a {disposition} entry cannot change sync state; restore it first"
+            )
         entry["sync_status"] = status
         entry["sync_updated_at"] = datetime.now(timezone.utc).isoformat()
         if error:
