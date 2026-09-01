@@ -356,6 +356,38 @@ def discover_global_lark_profiles() -> dict[str, Any]:
     }
 
 
+def private_profile_secret_state() -> dict[str, Any]:
+    """Local-only readiness check for the bound isolated profile's App Secret.
+
+    Never invokes lark-cli (no device-auth probe, no network) and never returns
+    a secret value. The setup dialogue uses this to ask for the App Secret
+    before manager/target steps can suggest commands that would dead-end on a
+    profile without credentials.
+    """
+    binding = _runtime_binding()
+    profile = binding["profile"]
+    result: dict[str, Any] = {
+        "bound": bool(profile),
+        "profile": profile,
+        "app_secret_storage": "missing" if profile else "unbound",
+        "ready": False,
+    }
+    if not profile:
+        return result
+    try:
+        payload = _read_lark_config(lark_cli_config_dir() / "config.json")
+    except (FileNotFoundError, ValueError, OSError):
+        return result
+    for item in payload["apps"]:
+        if str(item.get("name") or "").strip() != profile:
+            continue
+        storage = _secret_storage(item)
+        result["app_secret_storage"] = storage
+        result["ready"] = storage in {"inline", "keychain"}
+        break
+    return result
+
+
 def import_global_lark_profile(expected_app_id: str, target_profile: str) -> dict[str, Any]:
     """Clone one app credential into isolated state without modifying the source.
 

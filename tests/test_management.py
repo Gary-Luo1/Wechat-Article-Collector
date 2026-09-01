@@ -1065,7 +1065,14 @@ def test_feishu_create_base_previews_schema_without_cli(
     preview = payload["data"]["preview"]
     assert preview["field_count"] == 11
     assert preview["transport"].endswith("no shell JSON")
-    assert payload["next_action"] == "rerun_with_yes"
+    assert payload["next_action"] == "confirm_execution_policy_then_rerun"
+    authorization = payload["data"]["authorization_command"]
+    assert "execution-policy set" in authorization
+    assert "公众号文章" in authorization and "文章列表" in authorization
+    # Authorization routes through the persisted policy only: the guidance
+    # never suggests running feishu-create-base with --yes.
+    assert "feishu-create-base" not in authorization
+    assert payload["data"]["policy_match"] is False
 
 
 def test_feishu_create_base_uses_internal_schema_and_saves_mapping(
@@ -1922,3 +1929,394 @@ def test_windows_custom_install_path(tmp_path: Path):
     )
     assert result.returncode == 0, result.stderr
     assert (destination / "SKILL.md").is_file()
+
+
+def test_next_stage_requires_bot_app_secret_before_manager():
+    from config_store import DEFAULT_CONFIG
+    from execution_policy import next_stage
+
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
+    config["redfox"]["api_key"] = "key"
+    config["setup"]["search_window_confirmed"] = True
+    config["subscriptions"] = [{"name": "Example", "alias": "example"}]
+    config["feishu"].update(
+        {
+            "destination": "create",
+            "identity": "bot",
+            "expected_app_id": "cli_x",
+            "cli_profile": "p1",
+        }
+    )
+    config["setup"]["feishu_identity_confirmed"] = True
+    cli = {
+        "compatible": True,
+        "profile_secret": {"bound": True, "profile": "p1", "ready": False},
+    }
+    stage, action = next_stage(config, cli=cli)
+    assert stage == "feishu_secret_missing"
+    assert action == "provide_app_secret_for_private_profile"
+
+    cli_ready = {
+        "compatible": True,
+        "profile_secret": {"bound": True, "profile": "p1", "ready": True},
+    }
+    stage, action = next_stage(config, cli=cli_ready)
+    assert stage == "feishu_manager_missing"
+
+    # Legacy cli payloads without the secret field keep their old stages.
+    stage, action = next_stage(config, cli={"compatible": True})
+    assert stage == "feishu_manager_missing"
+
+
+def test_manage_next_surfaces_bot_secret_question(monkeypatch: pytest.MonkeyPatch):
+    import manage
+
+    configured()
+    config = manage.load_config()
+    config["setup"]["search_window_confirmed"] = True
+    config["feishu"].update(
+        {
+            "destination": "create",
+            "identity": "bot",
+            "expected_app_id": "cli_x",
+            "cli_profile": "p1",
+        }
+    )
+    config["setup"]["feishu_identity_confirmed"] = True
+    manage.save_config(config)
+    monkeypatch.setattr(
+        manage,
+        "lark_cli_info",
+        lambda: {
+            "compatible": True,
+            "profile_secret": {"bound": True, "profile": "p1", "ready": False},
+        },
+    )
+    state, action = manage._next_step()
+    assert state["stage"] == "feishu_secret_missing"
+    assert action == "provide_app_secret_for_private_profile"
+    assert "feishu-app-secret" in state["command"]
+    assert "App Secret" in state["question"]
+
+
+def test_wizard_provisioning_command_never_suggests_bare_create_yes(
+    isolated_home,
+):
+    import manage
+    from config_store import save_config
+    from lark_runtime import lark_cli_config_dir
+    from paths import secure_write_json
+
+    config = configured()
+    config["setup"]["feishu_identity_confirmed"] = True
+    config["feishu"].update(
+        {
+            "destination": "create",
+            "identity": "bot",
+            "expected_app_id": "cli_x",
+            "cli_profile": "p1",
+            "manager_open_id": "ou_manager",
+        }
+    )
+    save_config(config)
+    lark_cli_config_dir().mkdir(parents=True, exist_ok=True)
+    secure_write_json(
+        lark_cli_config_dir() / "config.json",
+        {"apps": [{"name": "p1", "appId": "cli_x", "appSecret": {"source": "keychain", "id": "k1"}}]},
+    )
+    state, action = manage._feishu_setup()
+    assert action == "provision_configured_feishu_base"
+    command = state["next_command"]
+    assert "feishu-create-base --name <名称> --table-name <表名>" in command
+    assert "feishu-create-base --name <名称> --table-name <表名> --yes" not in command
+    assert "策略同名精确匹配即自动授权" in command
+
+
+def test_reset_credentials_preview_lists_configured_fields(capsys):
+    import manage
+    from config_store import load_config, save_config
+
+    config = configured()
+    config["setup"]["feishu_identity_confirmed"] = True
+    config["setup"]["execution_policy"].update({"confirmed": True})
+    config["feishu"].update(
+        {
+            "identity": "bot",
+            "expected_app_id": "cli_x",
+            "cli_profile": "p1",
+            "manager_open_id": "ou_manager",
+            "destination": "create",
+        }
+    )
+    save_config(config)
+    assert manage.main(["reset", "--scope", "credentials"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    preview = payload["data"]["preview"]
+    assert "redfox.api_key" in preview
+    assert "setup.execution_policy" in preview
+    assert "feishu.expected_app_id" in preview
+    assert "feishu.manager_open_id" in preview
+    assert "feishu.destination" in preview
+    # Nothing was cleared by the preview itself.
+    assert load_config()["redfox"]["api_key"] == "redfox-key-secret"
+
+
+def test_doctor_online_failure_returns_error_envelope(
+    monkeypatch: pytest.MonkeyPatch, capsys
+):
+    import manage
+    import redfox_client
+    from redfox_client import RedfoxAuthError
+
+    configured()
+
+    class FakeClient:
+        def __init__(self, api_key, **kwargs):
+            pass
+
+        def query_work_list(self, **kwargs):
+            raise RedfoxAuthError("redfox API rejected the request: API Key无效")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(redfox_client, "RedfoxClient", FakeClient)
+    assert manage.main(["doctor", "--online"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "REDFOX_AUTH"
+    assert payload["error"]["next_action"] == "run_redfox_key_setup"
+    assert payload["data"]["online"]["redfox"]["ok"] is False
+    assert payload["data"]["online"]["redfox"]["error"]["code"] == "REDFOX_AUTH"
+
+
+def test_doctor_online_missing_key_fails_loudly(capsys):
+    import manage
+
+    configured()
+    config = manage.load_config()
+    config["redfox"]["api_key"] = ""
+    manage.save_config(config)
+    assert manage.main(["doctor", "--online"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "REDFOX_AUTH"
+
+
+def test_redfox_status_verify_failure_envelope(
+    monkeypatch: pytest.MonkeyPatch, capsys
+):
+    import manage
+
+    configured()
+    monkeypatch.setattr(
+        manage,
+        "_probe_redfox",
+        lambda api_key: {
+            "reachable": False,
+            "error_code": "REDFOX_AUTH",
+            "message": "redfox API rejected the request: API Key无效",
+        },
+    )
+    assert manage.main(["redfox-status", "--verify"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "REDFOX_AUTH"
+    assert payload["error"]["next_action"] == "run_redfox_key_setup"
+    assert payload["data"]["reachable"] is False
+    # Without --verify the same state stays informational.
+    monkeypatch.setattr(
+        manage, "_probe_redfox", lambda api_key: pytest.fail("must not probe")
+    )
+    assert manage.main(["redfox-status"]) == 0
+    informational = json.loads(capsys.readouterr().out)
+    assert informational["ok"] is True
+    assert informational["data"]["reachable"] is None
+
+
+def test_manage_accepts_format_flag_after_subcommand(capsys):
+    import manage
+
+    configured()
+    assert manage.main(["doctor", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert manage.main(["--format", "json", "config-show"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_payload_error_not_configured_maps_to_secret_fix():
+    from bitable_client import LarkCLIError, _payload_error
+
+    error = _payload_error({"error": {"type": "config", "message": "not configured"}}, [])
+    assert isinstance(error, LarkCLIError)
+    assert error.kind == "config"
+    assert "feishu-app-secret" in str(error)
+
+
+def test_payload_error_generic_failure_includes_raw_response():
+    from bitable_client import _payload_error
+
+    error = _payload_error({"ok": False, "code": 9999, "error": ""}, [])
+    message = str(error)
+    assert "raw response" in message
+    assert "9999" in message
+
+
+def test_private_profile_secret_state_is_local_only():
+    from config_store import load_config, save_config
+    from lark_runtime import lark_cli_config_dir, private_profile_secret_state
+    from paths import secure_write_json
+
+    # Unbound: no app selected yet.
+    configured()
+    state = private_profile_secret_state()
+    assert state == {
+        "bound": False,
+        "profile": "",
+        "app_secret_storage": "unbound",
+        "ready": False,
+    }
+
+    # Bound app without an isolated profile: the missing-secret dead end.
+    config = load_config()
+    config["setup"]["feishu_identity_confirmed"] = True
+    config["feishu"].update(
+        {"identity": "bot", "expected_app_id": "cli_x", "cli_profile": "p1"}
+    )
+    save_config(config)
+    state = private_profile_secret_state()
+    assert state["bound"] is True
+    assert state["ready"] is False
+    assert state["app_secret_storage"] == "missing"
+
+    # Profile with an inline secret becomes ready without any lark-cli call.
+    lark_cli_config_dir().mkdir(parents=True, exist_ok=True)
+    secure_write_json(
+        lark_cli_config_dir() / "config.json",
+        {"apps": [{"name": "p1", "appId": "cli_x", "appSecret": "inline-secret"}]},
+    )
+    state = private_profile_secret_state()
+    assert state["ready"] is True
+    assert state["app_secret_storage"] == "inline"
+
+
+def test_bot_identity_readiness_maps_to_bot_credentials_next_action(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import bitable_client
+    from protocol import failure
+
+    monkeypatch.setattr(
+        bitable_client,
+        "_run_lark",
+        lambda args, **kwargs: {
+            "data": {
+                "appid": "cli_x",
+                "identities": {
+                    "bot": {"available": True, "status": "not_ready"}
+                },
+            }
+        },
+    )
+    feishu = {
+        "identity": "bot",
+        "expected_app_id": "cli_x",
+        "binding_mode": "existing",
+    }
+    try:
+        bitable_client.verify_feishu_identity(feishu, identity="bot")
+    except Exception as exc:  # noqa: BLE001 - classified below
+        envelope = failure(exc)
+        assert envelope["error"]["code"] == "LARK_BOT_CREDENTIALS"
+        assert (
+            envelope["error"]["next_action"]
+            == "configure_bot_credentials_and_scopes_without_user_auth"
+        )
+        assert "do not run user auth" in envelope["error"]["message"]
+    else:
+        raise AssertionError("bot identity without a ready profile must fail")
+
+
+def test_manage_next_target_pending_routes_through_policy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import manage
+
+    configured()
+    config = manage.load_config()
+    config["setup"]["search_window_confirmed"] = True
+    config["feishu"].update(
+        {
+            "destination": "create",
+            "identity": "bot",
+            "expected_app_id": "cli_x",
+            "cli_profile": "p1",
+            "manager_open_id": "ou_manager",
+        }
+    )
+    config["setup"]["feishu_identity_confirmed"] = True
+    manage.save_config(config)
+    monkeypatch.setattr(
+        manage,
+        "lark_cli_info",
+        lambda: {
+            "compatible": True,
+            "profile_secret": {"bound": True, "profile": "p1", "ready": True},
+        },
+    )
+    state, action = manage._next_step()
+    assert state["stage"] == "feishu_target_pending"
+    assert action == "provision_configured_feishu_base"
+    command = state["command"]
+    assert "execution-policy set" in command
+    assert "feishu-create-base --name <已批准名> --table-name <已批准名>" in command
+    assert (
+        "feishu-create-base --name <已批准名> --table-name <已批准名> --yes"
+        not in command
+    )
+
+
+def test_agent_binding_skips_app_secret_gate(monkeypatch: pytest.MonkeyPatch):
+    import manage
+    from config_store import DEFAULT_CONFIG
+    from execution_policy import next_stage
+
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
+    config["redfox"]["api_key"] = "key"
+    config["setup"]["search_window_confirmed"] = True
+    config["subscriptions"] = [{"name": "Example", "alias": "example"}]
+    config["feishu"].update(
+        {
+            "destination": "create",
+            "identity": "bot",
+            "binding_mode": "agent",
+            "agent_source": "lark-channel",
+            "expected_app_id": "cli_x",
+            "cli_profile": "",
+            "manager_open_id": "ou_manager",
+        }
+    )
+    config["setup"]["feishu_identity_confirmed"] = True
+    # Host-provided credentials: an unready local profile must not trigger the
+    # App Secret question for an agent binding.
+    cli = {
+        "compatible": True,
+        "profile_secret": {"bound": False, "profile": "", "ready": False},
+    }
+    stage, _ = next_stage(config, cli=cli)
+    assert stage == "feishu_target_pending"
+
+    monkeypatch.setattr(
+        manage,
+        "lark_cli_info",
+        lambda: {
+            "compatible": True,
+            "profile_secret": {"bound": False, "profile": "", "ready": False},
+        },
+    )
+    from config_store import save_config
+
+    save_config(config)
+    state, action = manage._feishu_setup()
+    assert action != "provide_app_secret_for_private_profile"

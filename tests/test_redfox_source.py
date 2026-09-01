@@ -635,6 +635,8 @@ def test_parse_feishu_base_url_variants():
 def test_wizard_bot_branch_skips_oauth(isolated_home):
     import manage
     from config_store import save_config
+    from lark_runtime import lark_cli_config_dir
+    from paths import secure_write_json
 
     cfg = _config()
     cfg["feishu"].update(
@@ -647,9 +649,23 @@ def test_wizard_bot_branch_skips_oauth(isolated_home):
     )
     cfg["setup"]["feishu_identity_confirmed"] = True
     save_config(cfg)
+    # Without an App Secret in the isolated profile the wizard must collect it
+    # first; otherwise later stages would suggest commands that dead-end.
+    state, action = manage._feishu_setup()
+    assert action == "provide_app_secret_for_private_profile"
+    assert "feishu-app-secret" in state["next_command"]
+    assert "App Secret" in state["next_question"]
+    assert state["profile_secret_ready"] is False
+
+    lark_cli_config_dir().mkdir(parents=True, exist_ok=True)
+    secure_write_json(
+        lark_cli_config_dir() / "config.json",
+        {"apps": [{"name": "p1", "appId": "cli_x", "appSecret": "inline-secret"}]},
+    )
     state, action = manage._feishu_setup()
     assert action == "resolve_and_save_feishu_manager"
     assert "不需要扫码" in state["next_question"]
+    assert state["profile_secret_ready"] is True
 
 
 def test_needs_refresh_token_is_accepted(monkeypatch):

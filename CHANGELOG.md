@@ -38,6 +38,58 @@
   `--save-resolved` flag and `--unlisted-publisher` guide command were
   removed; `doctor --online` reports the billed probe call.
 
+### Fixed (from-zero onboarding walkthrough)
+
+- The Feishu bot-identity onboarding no longer dead-ends on a missing App
+  Secret: `manage feishu-setup` and `manage next` gain a
+  `feishu_secret_missing` stage (local-only profile check, no network) that
+  asks for the secret right after the app is bound, matching the documented
+  "bind app → pipe App Secret" order. Previously the wizard jumped straight
+  to provisioning and `feishu-create-base` failed with a bare
+  `LARK_CONFIG: not configured` and no remediation.
+- Provisioning guidance no longer suggests `feishu-create-base ... --yes`:
+  the wizard and `manage next` route through the persisted execution policy,
+  and the preview response returns `authorization_command` with
+  `next_action: confirm_execution_policy_then_rerun` instead of
+  `rerun_with_yes` (which invited bypassing a just-invalidated policy).
+  SKILL.md's "run without --yes; an exact policy match authorizes it" is now
+  the only suggested path.
+- `manage reset --scope credentials` preview lists the configured fields it
+  will clear (API key, Feishu binding/manager/target, execution policy)
+  instead of always showing an empty list while `--yes` wipes them.
+- Online-check failures are loud and consistent: `manage doctor --online`
+  and `manage redfox-status --verify` return `ok:false` with exit code 1
+  (full report kept under `data`) instead of `ok:true` with the failure
+  nested; `redfox-status --verify` now carries `run_redfox_key_setup`
+  guidance like doctor.
+- Feishu error envelopes: a rejected App Secret during `feishu-app-secret`
+  explains the likely cause and the console-copy remediation (and includes a
+  redacted raw CLI response for payload errors without a message); a bot
+  identity that is not ready raises the new `LARK_BOT_CREDENTIALS` code with
+  `configure_bot_credentials_and_scopes_without_user_auth` instead of
+  pointing at `feishu-auth start`, which bot identity must never run;
+  `LARK_CONFIG` errors map to `configure_isolated_lark_profile` instead of
+  the useless `inspect_command_help`.
+- `manage` accepts `--format json|text` after the subcommand
+  (`manage doctor --format json`), matching the `process`/`discover`
+  placement agents naturally use.
+
+### Fixed (skill-reviewer pass)
+
+- SKILL.md workflow steps renumbered 1-10 (two steps were both numbered 8),
+  and all indented command examples use the 3-space list-continuation indent
+  instead of mixed 3/4-space alignment.
+- The `description` frontmatter moves to the YAML multiline `|` form (a future
+  colon can no longer break parsing), states the paid per-call redfox.hk
+  boundary at trigger time, and adds casual Chinese trigger phrases that map
+  to real capabilities (生成公众号日报或简报 → digest-plan, 追更某个公众号 →
+  discover, 导出文章列表 → process export, 退订公众号 → subscriptions remove).
+- New `tests/test_skill_docs.py` guards the documentation invariants that code
+  tests cannot see: no `feishu-create-base ... --table-name X --yes` example
+  (authorization routes through the persisted policy), sequential workflow
+  numbering, uniform continuation indent, and the multiline description with
+  its paid boundary and casual triggers.
+
 ### BREAKING
 
 - Removed dead code left by the redfox-only switch: the WeChat subscription

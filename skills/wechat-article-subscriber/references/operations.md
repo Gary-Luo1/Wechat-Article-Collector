@@ -156,7 +156,10 @@ dimensions, and request any required external-write authorization.
 
 ## Safe disable and reset
 
-All destructive reset commands preview targets unless `--yes` is supplied:
+All destructive reset commands preview what they will change unless `--yes` is
+supplied. The credentials scope mutates configuration fields instead of
+deleting files, so its preview lists the configured fields it would clear
+(for example `redfox.api_key`, `feishu.expected_app_id`, `setup.execution_policy`):
 
 ```text
 manage feishu-disable
@@ -190,6 +193,6 @@ Machine-readable commands return one JSON object:
 {"ok":true,"data":{},"next_action":"none"}
 ```
 
-Failures use `error.code`, a redacted `message`, `retryable`, and `next_action`. Agents should branch on the code, not parse human prose. Current code families: `REDFOX_AUTH` (re-enter the key), `REDFOX_RATE_LIMITED`/`REDFOX_TRANSIENT` (the only retryable ones), `REDFOX_API_ERROR` (upstream code in details), `ARTICLE_READ_REQUIRED`, `ARTICLE_NOT_FOUND`, `ARTICLE_NOT_SYNCABLE` (dismissed/legacy entries have nothing to sync), `LARK_*` (Feishu CLI classification), `CONFIG_ERROR`, and `INVALID_ARGUMENT`. A failed discovery response can include safe `meta` counts for preserved partial progress. `process` accepts global formatting before the subcommand: `process --format json list`.
+Failures use `error.code`, a redacted `message`, `retryable`, and `next_action`. Agents should branch on the code, not parse human prose. Current code families: `REDFOX_AUTH` (re-enter the key), `REDFOX_RATE_LIMITED`/`REDFOX_TRANSIENT` (the only retryable ones), `REDFOX_API_ERROR` (upstream code in details), `ARTICLE_READ_REQUIRED`, `ARTICLE_NOT_FOUND`, `ARTICLE_NOT_SYNCABLE` (dismissed/legacy entries have nothing to sync), `LARK_*` (Feishu CLI classification), `CONFIG_ERROR`, and `INVALID_ARGUMENT`. A failed discovery response can include safe `meta` counts for preserved partial progress. `manage doctor --online` and `manage redfox-status --verify` return `ok:false` with exit code 1 when an online check fails, while keeping the full report under `data`. `process` accepts global formatting before the subcommand: `process --format json list`; `manage` accepts `--format` before or after its subcommand (`manage doctor --format json`).
 
 Configuration format changes are versioned. The first migration preserves a restricted `config.vN.backup.json`; `manage reset --scope all-data --yes` removes these backups too.

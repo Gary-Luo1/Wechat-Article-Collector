@@ -17,6 +17,7 @@ from lark_runtime import (
     lark_cli_environment,
     lark_cli_home_dir,
     lark_cli_work_dir,
+    private_profile_secret_state,
     resolve_lark_cli,
     safe_lark_arguments,
 )
@@ -213,6 +214,12 @@ def lark_cli_info() -> dict[str, Any]:
         version_tuple >= MIN_LARK_CLI_VERSION
         and version_tuple[0] <= MAX_LARK_CLI_MAJOR
     )
+    try:
+        profile_secret = private_profile_secret_state()
+    except Exception:
+        # Readiness must never break version reporting; the secret question
+        # falls back to the network-backed probe paths.
+        profile_secret = {"bound": False, "profile": "", "ready": False}
     return {
         "path": executable,
         "config_dir": str(lark_cli_config_dir()),
@@ -221,6 +228,7 @@ def lark_cli_info() -> dict[str, Any]:
         "version": ".".join(match.groups()),
         "tested_version": TESTED_LARK_CLI_VERSION,
         "compatible": compatible,
+        "profile_secret": profile_secret,
     }
 
 
@@ -276,6 +284,20 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
         if permission_violations
         else ""
     )
+    informative_parts = [
+        part for part in (subtype, hint, violations_text, console_url) if part.strip()
+    ]
+    if not informative_parts and message.replace(code_text, "").strip() in (
+        "",
+        "lark-cli request failed",
+    ):
+        # Some failures (e.g. a rejected App Secret during config init) return a
+        # JSON payload without message/msg fields; include a redacted snippet so
+        # the agent can see the underlying cause instead of a bare generic text.
+        snippet = _redact_cli_error(
+            json.dumps(payload, ensure_ascii=False)[:400], args
+        ).strip()
+        message = f"{code_text}lark-cli request failed | raw response: {snippet}"
     combined = " ".join(
         part for part in (message, subtype, hint, violations_text, console_url) if part
     )
@@ -294,6 +316,17 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
             "Feishu Base is not writable by the current user (91403). Verify the Base "
             "share/role permission; do not retry or silently switch to bot.",
             kind="permission",
+            code=code,
+        )
+    if "not configured" in lower or error_type == "not_configured":
+        # lark-cli reports a bare "not configured" when the pinned profile has
+        # no usable App credential; name the Skill-level fix explicitly so the
+        # dialogue can recover instead of dead-ending.
+        return LarkCLIError(
+            "the isolated lark-cli profile has no usable credentials for the bound "
+            "App ID; provide the App Secret with `printf %s '<APP_SECRET>' | manage "
+            "feishu-app-secret` (bot identity needs no OAuth) and retry",
+            kind="config",
             code=code,
         )
     if "client_secret" in lower or "config init --new" in lower:
@@ -363,8 +396,19 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
             for marker in ("timeout", "temporarily", "connection reset", "rate limit", "try again")
         )
     )
+    final_message = combined
+    if message.strip() in ("", "lark-cli request failed") and not any(
+        part for part in (subtype, hint, violations_text, console_url)
+    ):
+        # Some failures (e.g. a rejected App Secret during config init) return a
+        # JSON payload without message/msg fields; include a redacted snippet so
+        # the agent can see the underlying cause instead of a bare generic text.
+        snippet = _redact_cli_error(
+            json.dumps(payload, ensure_ascii=False)[:400], args
+        ).strip()
+        final_message = f"lark-cli request failed | raw response: {snippet}"
     return LarkCLIError(
-        _redact_cli_error(combined or "lark-cli request failed", args),
+        _redact_cli_error(final_message or "lark-cli request failed", args),
         kind="transient" if retryable else "api",
         code=code,
         retryable=retryable,
@@ -1017,7 +1061,10 @@ def verify_feishu_identity(
                 if selected_identity == "user"
                 else "Configure the app secret and required backend scopes; do not run user auth."
             ),
-            kind="authorization",
+            # Bot readiness is a credentials/scope gap, never a user-auth step;
+            # a dedicated kind keeps the envelope's next_action from pointing
+            # at feishu-auth start, which bot identity must never run.
+            kind="authorization" if selected_identity == "user" else "bot_credentials",
         )
     expected_user_open_id = str(feishu.get("expected_user_open_id") or "").strip()
     if selected_identity == "user" and expected_user_open_id:

@@ -52,9 +52,10 @@ from paths import config_path, data_dir, lock_path, queue_path, venv_dir
 from lark_runtime import (
     discover_global_lark_profiles,
     import_global_lark_profile,
+    private_profile_secret_state,
     profile_name_for_app,
 )
-from protocol import dump, failure, success
+from protocol import NEXT_ACTIONS, dump, failure, success
 
 
 STEP_LABELS = {
@@ -342,8 +343,12 @@ def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
         if not api_key:
             online_report["redfox"] = {
                 "ok": False,
-                "error_code": "REDFOX_AUTH",
-                "message": "redfox API key is missing; run redfox-set-key",
+                "error": {
+                    "code": "REDFOX_AUTH",
+                    "message": "redfox API key is missing; run redfox-set-key",
+                    "retryable": False,
+                    "next_action": "run_redfox_key_setup",
+                },
             }
         else:
             client = RedfoxClient(api_key)
@@ -354,7 +359,7 @@ def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
                 client.query_work_list(account="probe", offset=0, count=1)
                 online_report["redfox"] = {"ok": True}
             except Exception as exc:
-                online_report["redfox"] = failure(exc)["error"]
+                online_report["redfox"] = {"ok": False, "error": failure(exc)["error"]}
             finally:
                 client.close()
         if config["feishu"]["enabled"]:
@@ -367,7 +372,7 @@ def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
                     update_health("feishu", success=False, failure_kind=getattr(exc, "kind", type(exc).__name__))
                 except Exception:
                     pass
-                online_report["feishu"] = failure(exc)["error"]
+                online_report["feishu"] = {"ok": False, "error": failure(exc)["error"]}
         report["online"] = online_report
 
     config = load_config()
@@ -881,6 +886,30 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
             next_command="manage feishu-local-profile import --yes",
         )
         return state, "reuse_or_configure_private_lark_profile"
+    secret_state = private_profile_secret_state()
+    state["profile_secret_ready"] = secret_state["ready"]
+    if (
+        feishu["identity"] == "bot"
+        and app_id
+        # Agent bindings carry host-provided credentials; the App Secret
+        # question is only for Skill-owned (non-agent) profiles.
+        and str(feishu.get("binding_mode") or "") != "agent"
+        and not secret_state["ready"]
+    ):
+        # The bot chain has no OAuth step that would surface this gap later:
+        # without an App Secret every API call dead-ends, so collect it here
+        # (local check only; no network, no device-auth request).
+        state.update(
+            next_question=(
+                "bot 身份需要应用的 App Secret 才能调用飞书 API：请从开放平台应用的"
+                "『凭证与基础信息』复制，用 stdin 管道提供（不经过聊天回显）。"
+            ),
+            next_command=_pipe_cmd(
+                f"printf %s '<APP_SECRET>' | manage feishu-app-secret --app-id {app_id}"
+            ),
+            create_app_guide=guide,
+        )
+        return state, "provide_app_secret_for_private_profile"
     if feishu["identity"] == "bot" and not config["feishu"]["manager_open_id"]:
         known_user = ""
         try:
@@ -943,12 +972,13 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
             next_command=(
                 "manage execution-policy set --mode autopilot --feishu-provisioning allow "
                 "--base-name <名称> --table-name <表名> --feishu-sync allow --yes → "
-                "manage feishu-create-base --name <名称> --table-name <表名> --yes"
-                "（bot 身份会自动把管理权限授予已配置的管理员，无需再执行 grant-manager）"
-                if feishu["identity"] == "bot"
-                else "manage execution-policy set --mode autopilot --feishu-provisioning allow "
-                "--base-name <名称> --table-name <表名> --feishu-sync allow --yes → "
-                "manage feishu-create-base --name <名称> --table-name <表名> --yes"
+                "manage feishu-create-base --name <名称> --table-name <表名>"
+                "（策略同名精确匹配即自动授权，无需 --yes；"
+                + (
+                    "bot 身份会自动把管理权限授予已配置的管理员，无需再执行 grant-manager）"
+                    if feishu["identity"] == "bot"
+                    else "切勿自行加 --yes 绕过已固化的策略）"
+                )
             ),
         )
         return state, "provision_configured_feishu_base"
@@ -982,11 +1012,24 @@ def _feishu_app_secret(arguments: argparse.Namespace) -> tuple[dict[str, Any], s
     secret = _read_secret_stdin("the Feishu App Secret")
     if not secret:
         raise ValueError("the App Secret is empty")
-    _run_lark(
-        ["config", "init", "--app-id", app_id, "--app-secret-stdin"],
-        retries=1,
-        input_text=secret,
-    )
+    try:
+        _run_lark(
+            ["config", "init", "--app-id", app_id, "--app-secret-stdin"],
+            retries=1,
+            input_text=secret,
+        )
+    except LarkCLIError as exc:
+        # config init verifies the credential against Feishu's token endpoint,
+        # so a failure here almost always means the secret/App-ID pair was
+        # rejected; say so instead of surfacing a bare transport error.
+        raise LarkCLIError(
+            f"storing the App Secret failed: {exc} | the App Secret or App ID was "
+            "most likely rejected — copy a fresh App Secret from the Feishu Open "
+            "Platform console (凭证与基础信息) for the bound App ID and retry",
+            kind=exc.kind,
+            code=exc.code,
+            retryable=exc.retryable,
+        ) from exc
     probe = probe_app_secret_resolution()
     return {
         "app_id": app_id,
@@ -1166,11 +1209,28 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         "persisted_execution_policy" if policy_authorized else "current_command"
     )
     if not arguments.yes and not policy_authorized:
+        policy = policy_for(config)
         return {
             "preview": preview,
             "created": False,
             "policy_match": False,
-        }, "rerun_with_yes"
+            "policy_name_mismatch": bool(
+                policy["confirmed"]
+                and policy["mode"] == "autopilot"
+                and policy["allow_feishu_provisioning"]
+                and (
+                    policy["provision_base_name"] != base_name
+                    or policy["provision_table_name"] != table_name
+                )
+            ),
+            # Route through the persisted policy instead of "--yes", so the
+            # one-shot provisioning approval stays the only bypass-free path.
+            "authorization_command": (
+                "manage execution-policy set --mode autopilot --feishu-provisioning allow "
+                f"--base-name {base_name} --table-name {table_name} "
+                "--feishu-sync <allow|deny> [--yes]"
+            ),
+        }, "confirm_execution_policy_then_rerun"
     if (has_token or has_table) and not resuming:
         raise LarkCLIError(
             "a Feishu target is already configured; refusing to create another Base "
@@ -1681,6 +1741,11 @@ def _next_step() -> tuple[dict[str, Any], str]:
             False,
         ),
         "feishu_cli_incompatible": ("lark-cli 版本不兼容，需要安装受支持版本。", "manage feishu-setup", False),
+        "feishu_secret_missing": (
+            "bot 身份需要应用的 App Secret（stdin 管道提供，不经过聊天回显）：请从开放平台应用的『凭证与基础信息』复制后交给 Agent。",
+            _pipe_cmd("printf %s '<APP_SECRET>' | manage feishu-app-secret --app-id <APP_ID>"),
+            False,
+        ),
         "feishu_authorization_required": ("需要一次飞书扫码授权（最小权限）。",
             "manage feishu-setup", False),
         "feishu_authorization_waiting": ("上一次扫码授权还在等待：请完成页面确认或重新发起。",
@@ -1690,8 +1755,11 @@ def _next_step() -> tuple[dict[str, Any], str]:
             "manage feishu-manager --from-authorized-user（或 --open-id <OPEN_ID>）",
             False,
         ),
-        "feishu_target_pending": ("已批准建表：确认字段清单后将自动创建标准文章表。",
-            "manage feishu-create-base --name <已批准名> --table-name <已批准名> --yes", False),
+        "feishu_target_pending": (
+            "已批准建表：先固化执行策略（含相同 Base/表名，预览后 --yes 生效），再运行 create-base——策略同名精确匹配即自动授权，勿加 --yes。",
+            "manage execution-policy set --mode autopilot --feishu-provisioning allow --base-name <已批准名> --table-name <已批准名> --feishu-sync <allow|deny> [--yes] → manage feishu-create-base --name <已批准名> --table-name <已批准名>",
+            False,
+        ),
         "feishu_target_missing": ("请提供目标表格：飞书表格链接（manage feishu-target --url <链接>）或按引导新建。",
             "manage feishu-setup", False),
         "feishu_validation_failed": ("飞书只读校验失败：按 feishu-setup 指引修复。", "manage feishu-setup", False),
@@ -2052,10 +2120,18 @@ def _probe_redfox(api_key: str) -> dict[str, Any]:
         # a code=0/3203 response with an empty list is still a pass.
         client.query_work_list(account="probe", offset=0, count=1)
         return {"reachable": True}
-    except RedfoxAuthError:
-        return {"reachable": False, "error_code": "REDFOX_AUTH"}
+    except RedfoxAuthError as exc:
+        return {
+            "reachable": False,
+            "error_code": "REDFOX_AUTH",
+            "message": str(exc)[:200],
+        }
     except Exception as exc:  # classified by the protocol layer
-        return {"reachable": False, "error_code": getattr(exc, "code", type(exc).__name__)}
+        return {
+            "reachable": False,
+            "error_code": getattr(exc, "code", type(exc).__name__),
+            "message": str(exc)[:200],
+        }
     finally:
         client.close()
 
@@ -2121,6 +2197,50 @@ def _redfox_status(*, verify: bool = False) -> tuple[dict[str, Any], str]:
     return data, "none"
 
 
+def _credentials_reset_preview(config: dict[str, Any]) -> list[str]:
+    """List the configured values a credentials reset would clear.
+
+    The credentials scope mutates config fields instead of deleting files, so
+    the preview must describe those fields or it would misleadingly show
+    "nothing to do" right before wiping the Feishu binding and API key.
+    """
+    entries: list[str] = []
+    if config["redfox"]["api_key"].strip():
+        entries.append("redfox.api_key")
+    if config["setup"]["feishu_identity_confirmed"]:
+        entries.append("setup.feishu_identity_confirmed")
+    if (
+        config["setup"]["feishu_authorization"].get("state")
+        != DEFAULT_CONFIG["setup"]["feishu_authorization"]["state"]
+    ):
+        entries.append("setup.feishu_authorization")
+    policy = config["setup"]["execution_policy"]
+    if (
+        policy.get("confirmed")
+        or policy.get("allow_feishu_provisioning")
+        or policy.get("allow_feishu_sync")
+    ):
+        entries.append("setup.execution_policy")
+    for field in (
+        "agent_source",
+        "binding_mode",
+        "expected_app_id",
+        "cli_profile",
+        "expected_user_open_id",
+        "manager_open_id",
+        "base_token",
+        "table_id",
+        "provisioning",
+    ):
+        if str(config["feishu"].get(field) or "").strip():
+            entries.append(f"feishu.{field}")
+    if config["feishu"].get("destination") != "undecided":
+        entries.append("feishu.destination")
+    if config["feishu"].get("field_mapping"):
+        entries.append("feishu.field_mapping")
+    return entries
+
+
 def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     scope = arguments.scope
     targets: list[Path] = []
@@ -2156,7 +2276,10 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         # especially when WECHAT_ARTICLE_HOME points at a portable directory.
     existing = sorted({path.resolve() for path in targets if path.exists()}, key=str)
     if not arguments.yes:
-        return {"preview": [str(path) for path in existing], "deleted": []}, "rerun_with_yes"
+        preview: list[str] = [str(path) for path in existing]
+        if scope == "credentials":
+            preview = _credentials_reset_preview(load_config())
+        return {"preview": preview, "deleted": []}, "rerun_with_yes"
     if scope == "credentials":
         def mutate_reset(config: dict[str, Any]) -> dict[str, Any]:
             config["redfox"] = {"api_key": ""}
@@ -2357,14 +2480,69 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _hoist_format_flag(argv: list[str]) -> list[str]:
+    """Allow `--format json|text` after the subcommand, like process/discover.
+
+    No manage subcommand defines its own --format, so hoisting an occurrence
+    to the top-level position is unambiguous; agents otherwise hit an
+    argparse error for the natural `manage doctor --format json` ordering.
+    """
+    hoisted: list[str] = []
+    rest: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if (
+            token == "--format"
+            and index + 1 < len(argv)
+            and argv[index + 1] in ("json", "text")
+        ):
+            hoisted.extend((token, argv[index + 1]))
+            index += 2
+            continue
+        if token.startswith("--format=") and token.split("=", 1)[1] in ("json", "text"):
+            hoisted.append(token)
+            index += 1
+            continue
+        rest.append(token)
+        index += 1
+    return [*hoisted, *rest]
+
+
+def _failed_online_envelope(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Build an ok:false envelope when any doctor --online check failed.
+
+    SKILL.md requires the setup flow to "report connectivity problems and
+    stop"; a failed online check must not hide behind a top-level ok:true.
+    """
+    online = data.get("online")
+    if not isinstance(online, dict):
+        return None
+    for section, entry in online.items():
+        if isinstance(entry, dict) and entry.get("ok") is False:
+            error = dict(entry.get("error") or {})
+            error.setdefault("code", "INTERNAL_ERROR")
+            error.setdefault("message", f"online check failed: {section}")
+            error.setdefault("retryable", False)
+            error.setdefault("next_action", "inspect_command_help")
+            return {"ok": False, "data": data, "error": error}
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
-    arguments = build_parser().parse_args(argv)
+    raw_arguments = list(argv if argv is not None else sys.argv[1:])
+    arguments = build_parser().parse_args(_hoist_format_flag(raw_arguments))
     try:
         if arguments.command in SEED_CONFIG_COMMANDS:
             _seed_config_if_missing()
         next_action = "none"
         if arguments.command == "doctor":
             data, next_action = _doctor(online=arguments.online)
+            if arguments.online:
+                failed = _failed_online_envelope(data)
+                if failed is not None:
+                    print(dump(failed) if arguments.format == "json" else json.dumps(failed, ensure_ascii=False, indent=2))
+                    return 1
         elif arguments.command == "status":
             data, next_action = _status()
         elif arguments.command == "feishu-setup":
@@ -2381,6 +2559,22 @@ def main(argv: list[str] | None = None) -> int:
             data, next_action = _redfox_set_key()
         elif arguments.command == "redfox-status":
             data, next_action = _redfox_status(verify=arguments.verify)
+            if arguments.verify and data.get("reachable") is False:
+                code = str(data.get("error_code") or "INTERNAL_ERROR")
+                envelope = {
+                    "ok": False,
+                    "data": data,
+                    "error": {
+                        "code": code,
+                        "message": str(
+                            data.get("message") or "redfox reachability check failed"
+                        )[:500],
+                        "retryable": code in {"REDFOX_RATE_LIMITED", "REDFOX_TRANSIENT"},
+                        "next_action": NEXT_ACTIONS.get(code, "inspect_command_help"),
+                    },
+                }
+                print(dump(envelope) if arguments.format == "json" else json.dumps(envelope, ensure_ascii=False, indent=2))
+                return 1
         elif arguments.command == "config-show":
             data = redacted_config(load_config())
         elif arguments.command == "execution-policy":

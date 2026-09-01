@@ -35,10 +35,14 @@ Two target modes are confirmed with the user before anything is written:
 - **New standard table** — the wizard shows the exact 11-field list and only creates
   after the user confirms names and fields (one execution-policy approval).
 
-Bot identity runs the whole chain without an OAuth scan: bind app → pipe App Secret →
-`feishu-create-base --yes` (created as the bot) → the configured human manager is
-granted full access automatically. Personal identity instead uses one minimal-scope
-device authorization (Base read/write + offline_access only).
+Bot identity runs the whole chain without an OAuth scan: bind app → pipe App
+Secret → confirm manager → one execution-policy approval →
+`feishu-create-base` with the exactly matching approved names (the policy match
+authorizes it; no `--yes`) → the configured human manager is granted full
+access automatically. The wizard asks for the App Secret on the bot path as
+soon as the isolated profile lacks one, so no later step can dead-end on
+missing credentials. Personal identity instead uses one minimal-scope device
+authorization (Base read/write + offline_access only).
 
 `manage feishu-setup` is the single entry point for Feishu configuration. It never
 assumes prepared app information: for the current state it returns the question to

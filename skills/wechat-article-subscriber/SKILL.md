@@ -1,6 +1,12 @@
 ---
 name: wechat-article-subscriber
-description: Configure, discover, read, queue, export, and optionally sync WeChat Official Account articles (via the redfox.hk API) to Feishu Base. Use when a user asks to 配置微信公众号订阅、查微信公众号文章、发现新文章、批量阅读或评分文章、过滤推广内容、管理待处理文章，或把文章同步到飞书多维表格. Requires a local Python runtime and network access.
+description: |
+  Configure, discover, read, queue, export, and optionally sync WeChat Official
+  Account articles (via the paid per-call redfox.hk API) to Feishu Base. Use
+  when a user asks to 配置微信公众号订阅、查微信公众号文章、发现新文章、
+  批量阅读或评分文章、过滤推广内容、管理待处理文章、生成公众号日报或简报、
+  追更某个公众号、导出文章列表、退订公众号，或把文章同步到飞书多维表格.
+  Requires a local Python runtime, network access, and a paid redfox.hk API key.
 ---
 
 # WeChat Article Subscriber
@@ -64,7 +70,7 @@ Configuration is pure dialogue: loop on `manage next` — it returns the current
 
    ```text
    bash scripts/run.sh discover
-    bash scripts/run.sh process --format json inbox --status pending --sort newest
+   bash scripts/run.sh process --format json inbox --status pending --sort newest
    ```
 
    Use reversible inbox actions and optional `digest-plan` preferences as organization signals only. They never change the scoring rubric or authorize writes.
@@ -74,23 +80,23 @@ Configuration is pure dialogue: loop on `manage next` — it returns the current
    bash scripts/run.sh process --format json inbox-mark --link <URL> --later
    bash scripts/run.sh process --format json dismiss --link <URL>
    bash scripts/run.sh process --format json restore --link <URL>
-    bash scripts/run.sh manage preferences set --include-topic <TOPIC> --exclude-keyword <KEYWORD> --preferred-account <ACCOUNT>
-    bash scripts/run.sh process --format json digest-plan --hours 24 --limit 5
+   bash scripts/run.sh manage preferences set --include-topic <TOPIC> --exclude-keyword <KEYWORD> --preferred-account <ACCOUNT>
+   bash scripts/run.sh process --format json digest-plan --hours 24 --limit 5
    ```
 
-8. Read by stable URL, then score every non-ad article across exactly five dimensions from [references/scoring.md](references/scoring.md), and complete it. A successful `read` stores only a bounded local proof of the full text; `done` rejects unread non-ad articles and does not write Feishu. Use a temporary UTF-8 `--dims-file`; do not put large JSON on the shell command line. `done` automatically syncs qualified articles when the persisted policy allows it.
+9. Read by stable URL, then score every non-ad article across exactly five dimensions from [references/scoring.md](references/scoring.md), and complete it. A successful `read` stores only a bounded local proof of the full text; `done` rejects unread non-ad articles and does not write Feishu. Use a temporary UTF-8 `--dims-file`; do not put large JSON on the shell command line. `done` automatically syncs qualified articles when the persisted policy allows it.
 
    ```text
-    bash scripts/run.sh process read --link <URL>
-    bash scripts/run.sh process batch-read --limit 10
-    bash scripts/run.sh process done --link <URL> --dims-file <SCORES.json> --summary '<SUMMARY>' --tags 'tag1,tag2'
-    bash scripts/run.sh process done --link <URL> --ad
+   bash scripts/run.sh process read --link <URL>
+   bash scripts/run.sh process batch-read --limit 10
+   bash scripts/run.sh process done --link <URL> --dims-file <SCORES.json> --summary '<SUMMARY>' --tags 'tag1,tag2'
+   bash scripts/run.sh process done --link <URL> --ad
    ```
 
-9. Direct reads use the configured request delay. A batch stops immediately on WeChat risk control; retry only explicit transient failures, then report partial progress. Discovery queues each successfully processed account before moving to the next, so a later blocking failure does not discard prior articles. Preserve failed Feishu writes locally for repair. Pause and ask only for OAuth/device completion, unresolved identity/account ambiguity, expired credentials, new scopes, changed App/identity/manager/target/schema, a forced below-threshold write, or a destructive action. Never interpret an unchanged failure as permission to broaden scope.
+10. Direct reads use the configured request delay. A batch stops immediately on WeChat risk control; retry only explicit transient failures, then report partial progress. Discovery queues each successfully processed account before moving to the next, so a later blocking failure does not discard prior articles. Preserve failed Feishu writes locally for repair. Pause and ask only for OAuth/device completion, unresolved identity/account ambiguity, expired credentials, new scopes, changed App/identity/manager/target/schema, a forced below-threshold write, or a destructive action. Never interpret an unchanged failure as permission to broaden scope.
 
    ```text
-    bash scripts/run.sh process sync-feishu --all
+   bash scripts/run.sh process sync-feishu --all
    ```
 
 ## Operational commands

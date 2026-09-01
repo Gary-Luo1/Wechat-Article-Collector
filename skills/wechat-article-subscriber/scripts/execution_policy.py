@@ -112,6 +112,18 @@ def next_stage(
         return "feishu_cli_missing_or_unchecked", "ask_user_for_feishu_setup_choice"
     if not cli.get("compatible"):
         return "feishu_cli_incompatible", "install_compatible_lark_cli"
+    if (
+        config["feishu"]["identity"] == "bot"
+        and config["feishu"].get("expected_app_id")
+        # Agent bindings carry host-provided credentials via config bind;
+        # asking for an App Secret there would contradict the host context.
+        and config["feishu"].get("binding_mode") != "agent"
+        and isinstance(cli.get("profile_secret"), dict)
+        and cli["profile_secret"].get("ready") is False
+    ):
+        # A bot profile without an App Secret cannot call any API; ask for the
+        # secret before manager/target stages suggest commands that dead-end.
+        return "feishu_secret_missing", "provide_app_secret_for_private_profile"
     authorization = config["setup"]["feishu_authorization"]
     if config["feishu"]["identity"] == "user" and authorization["state"] != "authorized":
         if authorization["state"] == "waiting":
