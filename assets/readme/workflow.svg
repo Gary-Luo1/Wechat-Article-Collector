@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440" role="img" aria-labelledby="wtitle wdesc">
+  <title id="wtitle">文章处理管道</title>
+  <desc id="wdesc">从 redfox 发现文章，经正文抽取与五维评分进入本地 inbox，再可选经隔离 lark-cli 同步飞书 Base；也可跳过飞书仅本地导出。</desc>
+
+  <rect width="1200" height="440" rx="26" fill="#F6F8FA"/>
+  <rect x="1.5" y="1.5" width="1197" height="437" rx="24.5" fill="none" stroke="#D0D7DE" stroke-width="1.5"/>
+
+  <text x="56" y="52" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="28" font-weight="700" fill="#1F2328">处理管道</text>
+  <text x="56" y="84" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" fill="#656D76">redfox → 评分 → inbox → 飞书（可选）</text>
+
+  <!-- Main pipeline -->
+  <g id="pipeline" transform="translate(48 118)">
+    <g transform="translate(0 20)">
+      <rect x="0" y="0" width="150" height="100" rx="16" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+      <text x="75" y="44" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="20" font-weight="700" fill="#1F2328">对话配置</text>
+      <text x="75" y="72" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#656D76">Agent</text>
+    </g>
+
+    <path d="M158 70 H186" stroke="#D0D7DE" stroke-width="2" stroke-linecap="round"/>
+    <polygon points="186,64 198,70 186,76" fill="#07C160"/>
+
+    <g transform="translate(206 20)">
+      <rect x="0" y="0" width="150" height="100" rx="16" fill="#FFFFFF" stroke="#07C160" stroke-width="1.5"/>
+      <text x="75" y="44" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="20" font-weight="700" fill="#1F2328">redfox.hk</text>
+      <text x="75" y="72" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" fill="#656D76">别名发现</text>
+    </g>
+
+    <path d="M364 70 H392" stroke="#D0D7DE" stroke-width="2" stroke-linecap="round"/>
+    <polygon points="392,64 404,70 392,76" fill="#07C160"/>
+
+    <g transform="translate(412 20)">
+      <rect x="0" y="0" width="180" height="100" rx="16" fill="#FFFFFF" stroke="#07C160" stroke-width="1.5"/>
+      <text x="90" y="44" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="20" font-weight="700" fill="#1F2328">阅读 · 评分</text>
+      <text x="90" y="72" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" fill="#656D76">受限正文抽取</text>
+    </g>
+
+    <path d="M600 70 H628" stroke="#D0D7DE" stroke-width="2" stroke-linecap="round"/>
+    <polygon points="628,64 640,70 628,76" fill="#07C160"/>
+
+    <g transform="translate(648 20)">
+      <rect x="0" y="0" width="150" height="100" rx="16" fill="#FFFFFF" stroke="#07C160" stroke-width="1.5"/>
+      <text x="75" y="44" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="20" font-weight="700" fill="#1F2328">本地 inbox</text>
+      <text x="75" y="72" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" fill="#656D76">并发安全队列</text>
+    </g>
+
+    <!-- Mini article card -->
+    <g transform="translate(860 10)">
+      <rect x="0" y="0" width="240" height="120" rx="16" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+      <rect x="18" y="18" width="36" height="36" rx="10" fill="#07C160"/>
+      <text x="36" y="42" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" font-weight="700" fill="#FFFFFF">文</text>
+      <text x="68" y="42" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="20" font-weight="600" fill="#1F2328">文章卡片</text>
+      <rect x="18" y="70" width="140" height="12" rx="6" fill="#07C160"/>
+      <rect x="18" y="92" width="96" height="12" rx="6" fill="#3370FF"/>
+    </g>
+  </g>
+
+  <!-- Branch from inbox center: group x=48 + 648 + 75 = 771 -->
+  <path d="M771 238 V280" stroke="#D0D7DE" stroke-width="2" stroke-linecap="round"/>
+  <path d="M280 280 H1060" stroke="#D0D7DE" stroke-width="2" stroke-linecap="round"/>
+  <path d="M280 280 V308" stroke="#D0D7DE" stroke-width="2"/>
+  <path d="M1060 280 V308" stroke="#D0D7DE" stroke-width="2"/>
+
+  <g transform="translate(180 316)">
+    <rect x="0" y="0" width="200" height="80" rx="16" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+    <text x="100" y="36" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="20" font-weight="700" fill="#1F2328">跳过飞书</text>
+    <text x="100" y="60" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" fill="#656D76">仅本地导出</text>
+  </g>
+
+  <g transform="translate(960 316)">
+    <rect x="0" y="0" width="200" height="80" rx="16" fill="#FFFFFF" stroke="#3370FF" stroke-width="1.5"/>
+    <text x="100" y="36" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="20" font-weight="700" fill="#1F2328">隔离 lark-cli</text>
+    <text x="100" y="60" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" fill="#656D76">Feishu Base</text>
+  </g>
+</svg>
