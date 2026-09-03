@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="380" viewBox="0 0 1200 380" role="img" aria-labelledby="title desc">
+  <title id="title">WeChat Article Collector</title>
+  <desc id="desc">微信公众号文章订阅 Agent Skill：发现、五维评分、本地队列，并可选同步飞书。右侧展示发现、评分、队列、飞书四阶段流程。</desc>
+
+  <defs>
+    <linearGradient id="heroWash" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F6F8FA"/>
+      <stop offset="100%" stop-color="#EEF6F1"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="380" rx="26" fill="url(#heroWash)"/>
+  <rect x="1.5" y="1.5" width="1197" height="377" rx="24.5" fill="none" stroke="#D0D7DE" stroke-width="1.5"/>
+
+  <!-- Left title block -->
+  <g id="title-block" transform="translate(56 48)">
+    <rect x="0" y="0" width="148" height="32" rx="16" fill="#07C160"/>
+    <text x="74" y="22" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="16" font-weight="600" fill="#FFFFFF">Agent Skill</text>
+
+    <text x="0" y="92" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="44" font-weight="700" fill="#1F2328">WeChat Article</text>
+    <text x="0" y="144" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="44" font-weight="700" fill="#1F2328">Collector</text>
+
+    <text x="0" y="198" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="22" fill="#1F2328">发现、评分并可选同步</text>
+    <text x="0" y="230" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="22" fill="#1F2328">公众号文章到飞书</text>
+
+    <text x="0" y="278" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#656D76">Python 3.9+  ·  MIT  ·  install.sh → 对话配置</text>
+  </g>
+
+  <!-- Right sequence: 4 stages with article-card motif -->
+  <g id="project-proof" transform="translate(620 40)">
+    <rect x="0" y="0" width="524" height="300" rx="16" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+
+    <!-- Mini article card -->
+    <g transform="translate(28 24)">
+      <rect x="0" y="0" width="468" height="72" rx="12" fill="#F6F8FA" stroke="#D0D7DE" stroke-width="1.5"/>
+      <rect x="16" y="16" width="40" height="40" rx="10" fill="#07C160"/>
+      <text x="36" y="42" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" font-weight="700" fill="#FFFFFF">文</text>
+      <text x="72" y="34" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="20" font-weight="600" fill="#1F2328">订阅公众号文章卡片</text>
+      <text x="72" y="58" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#656D76">redfox · score · inbox · Feishu</text>
+    </g>
+
+    <!-- Four stage pills -->
+    <g transform="translate(28 120)">
+      <!-- Stage 1 发现 -->
+      <g transform="translate(0 0)">
+        <rect x="0" y="0" width="100" height="140" rx="16" fill="#FFFFFF" stroke="#07C160" stroke-width="1.5"/>
+        <circle cx="50" cy="36" r="18" fill="#07C160"/>
+        <text x="50" y="42" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">1</text>
+        <text x="50" y="78" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="22" font-weight="700" fill="#1F2328">发现</text>
+        <text x="50" y="108" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" fill="#656D76">按别名</text>
+      </g>
+
+      <path d="M108 70 H124" stroke="#D0D7DE" stroke-width="2" stroke-linecap="round"/>
+
+      <!-- Stage 2 评分 -->
+      <g transform="translate(132 0)">
+        <rect x="0" y="0" width="100" height="140" rx="16" fill="#FFFFFF" stroke="#07C160" stroke-width="1.5"/>
+        <circle cx="50" cy="36" r="18" fill="#07C160"/>
+        <text x="50" y="42" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">2</text>
+        <text x="50" y="78" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="22" font-weight="700" fill="#1F2328">评分</text>
+        <text x="50" y="108" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" fill="#656D76">五维</text>
+      </g>
+
+      <path d="M240 70 H256" stroke="#D0D7DE" stroke-width="2" stroke-linecap="round"/>
+
+      <!-- Stage 3 队列 -->
+      <g transform="translate(264 0)">
+        <rect x="0" y="0" width="100" height="140" rx="16" fill="#FFFFFF" stroke="#07C160" stroke-width="1.5"/>
+        <circle cx="50" cy="36" r="18" fill="#07C160"/>
+        <text x="50" y="42" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">3</text>
+        <text x="50" y="78" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="22" font-weight="700" fill="#1F2328">队列</text>
+        <text x="50" y="108" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" fill="#656D76">本地</text>
+      </g>
+
+      <path d="M372 70 H388" stroke="#D0D7DE" stroke-width="2" stroke-linecap="round"/>
+
+      <!-- Stage 4 飞书 -->
+      <g transform="translate(396 0)">
+        <rect x="0" y="0" width="100" height="140" rx="16" fill="#FFFFFF" stroke="#3370FF" stroke-width="1.5"/>
+        <circle cx="50" cy="36" r="18" fill="#3370FF"/>
+        <text x="50" y="42" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">4</text>
+        <text x="50" y="78" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="22" font-weight="700" fill="#1F2328">飞书</text>
+        <text x="50" y="108" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, system-ui, sans-serif" font-size="18" fill="#656D76">可选</text>
+      </g>
+    </g>
+  </g>
+</svg>
