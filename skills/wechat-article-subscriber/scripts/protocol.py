@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from typing import Any
 
 
@@ -92,3 +94,53 @@ def failure(exc: Exception, *, message: str | None = None) -> dict:
 
 def dump(envelope: dict[str, Any]) -> str:
     return json.dumps(envelope, ensure_ascii=False)
+
+
+def hoist_format_flag(argv: list[str]) -> list[str]:
+    """Allow `--format json|text` after the subcommand, like process/discover.
+
+    No manage subcommand defines its own --format, so hoisting an occurrence
+    to the top-level position is unambiguous; agents otherwise hit an
+    argparse error for the natural `manage doctor --format json` ordering.
+    """
+    hoisted: list[str] = []
+    rest: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if (
+            token == "--format"
+            and index + 1 < len(argv)
+            and argv[index + 1] in ("json", "text")
+        ):
+            hoisted.extend((token, argv[index + 1]))
+            index += 2
+            continue
+        if token.startswith("--format=") and token.split("=", 1)[1] in ("json", "text"):
+            hoisted.append(token)
+            index += 1
+            continue
+        rest.append(token)
+        index += 1
+    return [*hoisted, *rest]
+
+
+def _pipe_cmd(template: str) -> str:
+    """Render a `printf %s '<...>' | cmd` template for the current shell.
+
+    Native PowerShell has no printf; there the plain pipeline form works for
+    ASCII secrets (non-ASCII values should use the agent-file inbox instead).
+    """
+    if os.name == "nt":
+        return template.replace("printf %s '", "'")
+    return template
+
+
+def _read_secret_stdin(name: str) -> str:
+    """Read a bounded secret from piped stdin, never from an interactive TTY."""
+    if sys.stdin.isatty():
+        raise ValueError(f"{name} must be piped on standard input, not typed interactively")
+    value = sys.stdin.read(64 * 1024 + 1)
+    if len(value) > 64 * 1024:
+        raise ValueError(f"{name} exceeds 64 KiB")
+    return value.strip()

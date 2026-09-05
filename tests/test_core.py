@@ -610,9 +610,9 @@ class TestBitable:
         assert "must-not-leak" not in json.dumps(context)
 
     def test_profile_list_json_array_is_supported(self):
-        import bitable_client
+        import lark_runtime
 
-        profiles = bitable_client._json_value(
+        profiles = lark_runtime._json_value(
             '[{"name":"other","appId":"cli_other","active":true}]'
         )
         assert isinstance(profiles, list)
@@ -793,6 +793,7 @@ class TestBitable:
 
     def test_permission_error_is_not_retried(self, monkeypatch: pytest.MonkeyPatch):
         import bitable_client
+        import lark_runtime
 
         result = mock.Mock(
             returncode=1,
@@ -802,8 +803,8 @@ class TestBitable:
             ),
         )
         run = mock.Mock(return_value=result)
-        monkeypatch.setattr(bitable_client, "_lark_cli", lambda: "lark-cli")
-        monkeypatch.setattr(bitable_client.subprocess, "run", run)
+        monkeypatch.setattr(lark_runtime, "_lark_cli", lambda: "lark-cli")
+        monkeypatch.setattr(lark_runtime.subprocess, "run", run)
         with pytest.raises(bitable_client.LarkCLIError) as error:
             bitable_client._run_lark(["base", "+field-list"], retries=3)
         assert error.value.kind == "permission"
@@ -811,6 +812,7 @@ class TestBitable:
 
     def test_transient_conflict_is_retried(self, monkeypatch: pytest.MonkeyPatch):
         import bitable_client
+        import lark_runtime
 
         conflict = mock.Mock(
             returncode=1,
@@ -821,9 +823,9 @@ class TestBitable:
         )
         success = mock.Mock(returncode=0, stdout='{"ok":true,"data":{}}', stderr="")
         run = mock.Mock(side_effect=[conflict, success])
-        monkeypatch.setattr(bitable_client, "_lark_cli", lambda: "lark-cli")
-        monkeypatch.setattr(bitable_client.subprocess, "run", run)
-        monkeypatch.setattr(bitable_client.time, "sleep", lambda _: None)
+        monkeypatch.setattr(lark_runtime, "_lark_cli", lambda: "lark-cli")
+        monkeypatch.setattr(lark_runtime.subprocess, "run", run)
+        monkeypatch.setattr(lark_runtime.time, "sleep", lambda _: None)
         assert bitable_client._run_lark(["base", "+field-list"])["ok"] is True
         assert run.call_count == 2
 
@@ -831,12 +833,13 @@ class TestBitable:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         import bitable_client
+        import lark_runtime
         from paths import data_dir
 
         result = mock.Mock(returncode=0, stdout='{"ok":true,"data":{}}', stderr="")
         run = mock.Mock(return_value=result)
-        monkeypatch.setattr(bitable_client, "_lark_cli", lambda: "lark-cli")
-        monkeypatch.setattr(bitable_client.subprocess, "run", run)
+        monkeypatch.setattr(lark_runtime, "_lark_cli", lambda: "lark-cli")
+        monkeypatch.setattr(lark_runtime.subprocess, "run", run)
         bitable_client._run_lark(["config", "show"], retries=1)
         kwargs = run.call_args.kwargs
         assert kwargs["env"]["LARKSUITE_CLI_CONFIG_DIR"] == str(
@@ -845,7 +848,7 @@ class TestBitable:
         assert kwargs["cwd"] == (data_dir() / "lark-cli-work").resolve()
 
     def test_cli_error_redacts_identifiers(self):
-        from bitable_client import _redact_cli_error
+        from lark_runtime import _redact_cli_error
 
         args = [
             "--base-token",

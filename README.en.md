@@ -65,7 +65,7 @@ bash install.sh --target agents
 > Pass secrets via stdin / local hidden input / controlled inbox — **never** CLI args, repo files, or logs. Local `config.json` is plaintext; do not commit it.
 
 Targets: `agents` · `codex` · `claude` · `copilot` · `openclaw` · `hermes` · `all`  
-Skill files only: `--no-deps` (requires `requests`, `beautifulsoup4`, `curl_cffi` on the system Python).
+Skill files only: `--no-deps` (requires `requests` and `curl_cffi` on the system Python).
 
 ---
 
@@ -102,7 +102,7 @@ install.sh / install.ps1
 | Layer | Notes |
 |-------|--------|
 | Runtime | Python 3.9+ |
-| HTTP | `requests`, `curl_cffi` (+ `beautifulsoup4` with `--no-deps`) |
+| HTTP | `requests`, `curl_cffi` |
 | Source | redfox.hk wide library (alias query, paid) |
 | Optional Feishu | Node.js 18+, `@larksuite/cli` (isolated config) |
 | Spec | [Agent Skills specification](https://agentskills.io/specification) |

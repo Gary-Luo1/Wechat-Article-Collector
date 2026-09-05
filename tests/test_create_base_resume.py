@@ -49,26 +49,27 @@ def _created_payload():
 
 def test_feishu_create_base_resumes_after_grant_failure(tmp_path, monkeypatch, capsys):
     import manage
+    import manage_feishu
     from bitable_client import LarkCLIError
     from config_store import load_config
 
+
     _configured(monkeypatch, tmp_path / "state")
     calls = {"create": 0, "grant": 0}
-    monkeypatch.setattr(manage, "verify_feishu_identity", lambda *a, **k: {"status": "ready"})
+    monkeypatch.setattr(manage_feishu, "verify_feishu_identity", lambda *a, **k: {"status": "ready"})
 
     def create_standard_base(*args, **kwargs):
         calls["create"] += 1
         return _created_payload()
 
-    monkeypatch.setattr(manage, "create_standard_base", create_standard_base)
+    monkeypatch.setattr(manage_feishu, "create_standard_base", create_standard_base)
 
     def failing_grant(*args, **kwargs):
         calls["grant"] += 1
         raise LarkCLIError("member already exists", kind="duplicate")
 
-    monkeypatch.setattr(manage, "grant_bot_created_resource", failing_grant)
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu, "grant_bot_created_resource", failing_grant)
+    monkeypatch.setattr(manage_feishu,
         "preflight_feishu",
         lambda *a, **k: {
             "mapping": {
@@ -94,8 +95,7 @@ def test_feishu_create_base_resumes_after_grant_failure(tmp_path, monkeypatch, c
     assert saved["created_table_name"] == "文章列表"
 
     # Retry: the Base must not be created twice; grant now succeeds.
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "grant_bot_created_resource",
         lambda *a, **k: {"ok": True},
     )
@@ -118,8 +118,10 @@ def test_feishu_create_base_resume_rejects_non_duplicate_grant_failure(
     tmp_path, monkeypatch, capsys
 ):
     import manage
+    import manage_feishu
     from bitable_client import LarkCLIError
     from config_store import load_config, save_config
+
 
     _configured(monkeypatch, tmp_path / "state")
     config = load_config()
@@ -134,18 +136,15 @@ def test_feishu_create_base_resume_rejects_non_duplicate_grant_failure(
         }
     )
     save_config(config)
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "verify_feishu_identity",
         lambda *a, **k: {"status": "ready"},
     )
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "create_standard_base",
         lambda *a, **k: pytest.fail("must not create a second Base"),
     )
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "grant_bot_created_resource",
         lambda *a, **k: (_ for _ in ()).throw(
             LarkCLIError("permission denied", kind="permission")
@@ -164,6 +163,7 @@ def test_feishu_create_base_resume_rejects_non_duplicate_grant_failure(
 
 def test_feishu_create_base_resume_rejects_name_mismatch(tmp_path, monkeypatch, capsys):
     import manage
+    import manage_feishu
     from config_store import load_config, save_config
 
     _configured(monkeypatch, tmp_path / "state")
@@ -179,13 +179,11 @@ def test_feishu_create_base_resume_rejects_name_mismatch(tmp_path, monkeypatch, 
         }
     )
     save_config(config)
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "create_standard_base",
         lambda *a, **k: pytest.fail("must not create a second Base"),
     )
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "grant_bot_created_resource",
         lambda *a, **k: pytest.fail("must not grant on mismatch"),
     )
@@ -202,6 +200,7 @@ def test_feishu_create_base_resume_rejects_name_mismatch(tmp_path, monkeypatch, 
 
 def test_feishu_create_base_still_refuses_foreign_target(tmp_path, monkeypatch, capsys):
     import manage
+    import manage_feishu
     from config_store import load_config, save_config
 
     _configured(monkeypatch, tmp_path / "state")
@@ -215,8 +214,7 @@ def test_feishu_create_base_still_refuses_foreign_target(tmp_path, monkeypatch, 
         }
     )
     save_config(config)
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "create_standard_base",
         lambda *a, **k: pytest.fail("must not create a second Base"),
     )

@@ -63,7 +63,7 @@ bash install.sh --target agents
 > 密钥走 stdin / 本地隐藏输入 / 受控 inbox，**不要**放进命令行参数、仓库或日志。本地 `config.json` 为明文，勿提交。
 
 可选目标：`agents` · `codex` · `claude` · `copilot` · `openclaw` · `hermes` · `all`  
-仅装 Skill 文件：`--no-deps`（需本机已有 `requests`、`beautifulsoup4`、`curl_cffi`）
+仅装 Skill 文件：`--no-deps`（需本机已有 `requests`、`curl_cffi`）
 
 ---
 
@@ -102,7 +102,7 @@ install.sh / install.ps1
 | 层 | 内容 |
 |---|---|
 | 运行时 | Python 3.9+ |
-| HTTP | `requests`、`curl_cffi`（`--no-deps` 时另需 `beautifulsoup4`） |
+| HTTP | `requests`、`curl_cffi` |
 | 数据源 | redfox.hk 广域库（微信号别名，按次计费） |
 | 可选飞书 | Node.js 18+、`@larksuite/cli`（隔离配置） |
 | 规范 | [Agent Skills specification](https://agentskills.io/specification) |

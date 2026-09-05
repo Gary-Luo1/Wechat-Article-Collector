@@ -584,7 +584,7 @@ def test_execution_policy_partial_patch_preserves_omitted_fields(
 
 
 def test_agent_source_detection_per_platform(monkeypatch: pytest.MonkeyPatch):
-    import manage
+    import manage_feishu
 
     for name in (
         "OPENCLAW_HOME",
@@ -597,18 +597,18 @@ def test_agent_source_detection_per_platform(monkeypatch: pytest.MonkeyPatch):
         "LARK_CHANNEL_APP_ID",
     ):
         monkeypatch.delenv(name, raising=False)
-    assert manage._detect_agent_source() == ""
+    assert manage_feishu._detect_agent_source() == ""
 
     monkeypatch.setenv("OPENCLAW_HOME", "/tmp/oc")
-    assert manage._detect_agent_source() == "openclaw"
+    assert manage_feishu._detect_agent_source() == "openclaw"
     monkeypatch.delenv("OPENCLAW_HOME")
 
     monkeypatch.setenv("HERMES_STATE_DIR", "/tmp/hermes")
-    assert manage._detect_agent_source() == "hermes"
+    assert manage_feishu._detect_agent_source() == "hermes"
     monkeypatch.delenv("HERMES_STATE_DIR")
 
     monkeypatch.setenv("LARK_CHANNEL_APP_ID", "cli_x")
-    assert manage._detect_agent_source() == "lark-channel"
+    assert manage_feishu._detect_agent_source() == "lark-channel"
 
 
 def test_config_accepts_openclaw_and_hermes_agent_source(
@@ -655,6 +655,7 @@ def test_feishu_context_self_heals_cli_profile_for_existing_binding(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
     from config_store import load_config, save_config
 
     config = configured()
@@ -672,8 +673,7 @@ def test_feishu_context_self_heals_cli_profile_for_existing_binding(
         }
     )
     save_config(config)
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "resolve_lark_profile",
         lambda app_id: {
             "profile": "cli_a95a41a64eb81ceb",
@@ -682,8 +682,7 @@ def test_feishu_context_self_heals_cli_profile_for_existing_binding(
             "match_count": 1,
         },
     )
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "feishu_identity_context",
         lambda verify=False: {
             "identity": "bot",
@@ -723,6 +722,7 @@ def test_feishu_context_never_guesses_generic_agent_bot(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
     from config_store import load_config, save_config
 
     configured()
@@ -731,8 +731,7 @@ def test_feishu_context_never_guesses_generic_agent_bot(
     config["feishu"]["agent_source"] = "lark-channel"
     config["setup"]["feishu_identity_confirmed"] = True
     save_config(config)
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "feishu_identity_context",
         lambda verify=False: pytest.fail(
             "CLI default profile must not be read without the host App ID"
@@ -752,6 +751,7 @@ def test_feishu_context_pins_profile_matching_current_conversation_app(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
     from config_store import load_config, save_config
 
     configured()
@@ -769,8 +769,7 @@ def test_feishu_context_pins_profile_matching_current_conversation_app(
     )
     config["setup"]["feishu_identity_confirmed"] = True
     save_config(config)
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "resolve_lark_profile",
         lambda app_id: {
             "profile": "current-bot",
@@ -792,7 +791,7 @@ def test_feishu_context_pins_profile_matching_current_conversation_app(
             "bot": {"available": True, "status": "ready"},
         }
 
-    monkeypatch.setattr(manage, "feishu_identity_context", identity_context)
+    monkeypatch.setattr(manage_feishu, "feishu_identity_context", identity_context)
     assert manage.main(["feishu-context", "--verify"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert load_config()["feishu"]["cli_profile"] == "current-bot"
@@ -805,10 +804,10 @@ def test_feishu_context_requires_identity_before_cli_authorization(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
 
     configured()
-    context = monkeypatch.setattr(
-        manage,
+    context = monkeypatch.setattr(manage_feishu,
         "feishu_identity_context",
         lambda verify=False: pytest.fail("CLI context must not run before identity choice"),
     )
@@ -977,6 +976,7 @@ def test_bot_created_resource_grants_manager_full_access(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
     from config_store import save_config
 
     config = configured()
@@ -991,13 +991,11 @@ def test_bot_created_resource_grants_manager_full_access(
     save_config(config)
     verified: list[tuple[dict, str]] = []
     granted: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "verify_feishu_identity",
         lambda value, identity=None: verified.append((value, identity)) or {"status": "ready"},
     )
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "grant_bot_created_resource",
         lambda token, resource_type, manager: granted.append(
             (token, resource_type, manager)
@@ -1042,13 +1040,13 @@ def test_feishu_create_base_previews_schema_without_cli(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
 
     config = configured()
     config["feishu"]["destination"] = "create"
     from config_store import save_config
     save_config(config)
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "create_standard_base",
         lambda *args, **kwargs: pytest.fail("preview must not create a Base"),
     )
@@ -1079,6 +1077,7 @@ def test_feishu_create_base_uses_internal_schema_and_saves_mapping(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
     from config_store import load_config, save_config
 
     config = configured()
@@ -1093,13 +1092,11 @@ def test_feishu_create_base_uses_internal_schema_and_saves_mapping(
         }
     )
     save_config(config)
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "verify_feishu_identity",
         lambda *args, **kwargs: {"status": "ready"},
     )
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "create_standard_base",
         lambda *args, **kwargs: {
             "ok": True,
@@ -1109,13 +1106,11 @@ def test_feishu_create_base_uses_internal_schema_and_saves_mapping(
             },
         },
     )
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "grant_bot_created_resource",
         lambda *args, **kwargs: {"ok": True},
     )
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "preflight_feishu",
         lambda *args, **kwargs: {
             "mapping": {
@@ -1148,6 +1143,7 @@ def test_feishu_create_base_uses_matching_persisted_policy_without_yes(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
     from config_store import load_config, save_config
 
     config = configured()
@@ -1172,9 +1168,8 @@ def test_feishu_create_base_uses_matching_persisted_policy_without_yes(
         }
     )
     save_config(config)
-    monkeypatch.setattr(manage, "verify_feishu_identity", lambda *a, **k: {"status": "ready"})
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu, "verify_feishu_identity", lambda *a, **k: {"status": "ready"})
+    monkeypatch.setattr(manage_feishu,
         "create_standard_base",
         lambda *a, **k: {
             "ok": True,
@@ -1184,9 +1179,8 @@ def test_feishu_create_base_uses_matching_persisted_policy_without_yes(
             },
         },
     )
-    monkeypatch.setattr(manage, "grant_bot_created_resource", lambda *a, **k: {"ok": True})
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu, "grant_bot_created_resource", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(manage_feishu,
         "preflight_feishu",
         lambda *a, **k: {
             "mapping": {
@@ -1217,6 +1211,7 @@ def test_user_authorization_start_is_idempotent(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
     from config_store import load_config
 
     configured()
@@ -1226,7 +1221,7 @@ def test_user_authorization_start_is_idempotent(
         "user": {"available": False, "status": "", "token_status": ""},
         "bot": {"available": False, "status": ""},
     }
-    probe = monkeypatch.setattr(manage, "feishu_identity_context", lambda verify=False: context)
+    probe = monkeypatch.setattr(manage_feishu, "feishu_identity_context", lambda verify=False: context)
     assert probe is None
     assert manage.main(["feishu-auth", "start"]) == 0
     first = json.loads(capsys.readouterr().out)
@@ -1243,13 +1238,13 @@ def test_user_authorization_complete_records_verified_state(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
     from config_store import load_config
 
     configured()
     assert manage.main(["feishu-identity", "--as", "user"]) == 0
     capsys.readouterr()
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "feishu_identity_context",
         lambda verify=False: {
             "user": {"available": True, "status": "ready", "token_status": "valid"},
@@ -1268,6 +1263,7 @@ def test_expired_verified_authorization_starts_only_one_new_flow(
     monkeypatch: pytest.MonkeyPatch, capsys
 ):
     import manage
+    import manage_feishu
     from config_store import load_config, save_config
 
     configured()
@@ -1282,8 +1278,7 @@ def test_expired_verified_authorization_starts_only_one_new_flow(
         }
     )
     save_config(config)
-    monkeypatch.setattr(
-        manage,
+    monkeypatch.setattr(manage_feishu,
         "feishu_identity_context",
         lambda verify=False: {
             "app_id_unambiguous": True,
@@ -1517,23 +1512,23 @@ def test_done_uses_persisted_feishu_sync_policy(
 
 
 def test_lark_cli_version_range_is_reported(monkeypatch: pytest.MonkeyPatch):
-    import bitable_client
+    import lark_runtime
 
-    monkeypatch.setattr(bitable_client, "_lark_cli", lambda: "lark-cli")
+    monkeypatch.setattr(lark_runtime, "_lark_cli", lambda: "lark-cli")
     monkeypatch.setattr(
-        bitable_client.subprocess,
+        lark_runtime.subprocess,
         "run",
         lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "lark-cli 2.0.0", "stderr": ""})(),
     )
-    info = bitable_client.lark_cli_info()
+    info = lark_runtime.lark_cli_info()
     assert info["version"] == "2.0.0"
     assert info["compatible"] is False
 
 
 def test_lark_confirmation_envelope_is_not_misclassified_as_api_error():
-    import bitable_client
+    import lark_runtime
 
-    error = bitable_client._payload_error(
+    error = lark_runtime._payload_error(
         {
             "ok": False,
             "error": {
@@ -2146,7 +2141,7 @@ def test_manage_accepts_format_flag_after_subcommand(capsys):
 
 
 def test_payload_error_not_configured_maps_to_secret_fix():
-    from bitable_client import LarkCLIError, _payload_error
+    from lark_runtime import LarkCLIError, _payload_error
 
     error = _payload_error({"error": {"type": "config", "message": "not configured"}}, [])
     assert isinstance(error, LarkCLIError)
@@ -2155,7 +2150,7 @@ def test_payload_error_not_configured_maps_to_secret_fix():
 
 
 def test_payload_error_generic_failure_includes_raw_response():
-    from bitable_client import _payload_error
+    from lark_runtime import _payload_error
 
     error = _payload_error({"ok": False, "code": 9999, "error": ""}, [])
     message = str(error)

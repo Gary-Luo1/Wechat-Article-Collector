@@ -25,7 +25,7 @@ bash install.sh --target agents --destination /custom/skills/wechat-article-subs
 .\install.ps1 -Target agents -InstallPath C:\custom\skills\wechat-article-subscriber
 ```
 
-Do not combine a custom destination with `all`. The installer atomically backs up an existing copy, installs only canonical files, and creates an isolated runtime in application state. `WECHAT_SKILL_INSTALL_ROOT` remains available for CI. `--no-deps` / `-NoDeps` requires `requests`, `beautifulsoup4`, and `curl_cffi` in the selected runtime.
+Do not combine a custom destination with `all`. The installer atomically backs up an existing copy, installs only canonical files, and creates an isolated runtime in application state. `WECHAT_SKILL_INSTALL_ROOT` remains available for CI. `--no-deps` / `-NoDeps` requires `requests` and `curl_cffi` in the selected runtime.
 
 ## Windows configuration without pipes
 

@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from bitable_client import LarkCLIError, lark_cli_info, preflight_feishu, upsert_article
+from bitable_client import preflight_feishu, upsert_article
+from lark_runtime import LarkCLIError, lark_cli_info
 
 
 class FeishuTarget:

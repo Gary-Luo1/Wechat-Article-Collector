@@ -58,7 +58,7 @@ article bodies, mark articles complete, or write Feishu.
 - For `user`, reuse a ready authorization. If none exists, start one minimum `base` authorization flow and resume that same device code; do not start another flow after authorization succeeds.
 - For `bot`, never run user authorization. Use only the configured bot credentials and backend scopes.
 - Persist only the authorization state (`not_started`, `waiting`, `authorized`,
-  `expired`, or `not_required`), selected identity, and timestamps. Never persist
+  `expired`, `failed`, or `not_required`), selected identity, and timestamps. Never persist
   the device code, verification URL, access token, or app secret in Skill config.
 - Existing user-level lark-cli profiles may be scanned only through the redacted
   metadata reader. Import requires an exact App-ID match and explicit preview,

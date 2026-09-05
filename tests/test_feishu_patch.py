@@ -166,7 +166,7 @@ def test_feishu_patch_derives_destination_and_enablement_from_new_target(
 
 
 def test_lark_duplicate_member_error_is_classified(tmp_path):
-    from bitable_client import _payload_error
+    from lark_runtime import _payload_error
 
     duplicate = _payload_error(
         {

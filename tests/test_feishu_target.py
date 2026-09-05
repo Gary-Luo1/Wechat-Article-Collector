@@ -17,7 +17,7 @@ def make_target(feishu=None, cli=None, preflight=None, upsert=None):
 
 
 def test_check_disabled_raises_config_kind():
-    from bitable_client import LarkCLIError
+    from lark_runtime import LarkCLIError
 
     target = make_target(feishu={"enabled": False})
     with pytest.raises(LarkCLIError) as excinfo:
@@ -26,7 +26,7 @@ def test_check_disabled_raises_config_kind():
 
 
 def test_check_incompatible_cli_raises_version_kind():
-    from bitable_client import LarkCLIError
+    from lark_runtime import LarkCLIError
 
     target = make_target(cli=lambda: {"compatible": False, "version": "0.9"})
     with pytest.raises(LarkCLIError) as excinfo:
@@ -42,7 +42,7 @@ def test_check_passes_preflight_result_through():
 
 
 def test_sync_disabled_raises_config_kind():
-    from bitable_client import LarkCLIError
+    from lark_runtime import LarkCLIError
 
     target = make_target(feishu={"enabled": False})
     with pytest.raises(LarkCLIError) as excinfo:
@@ -64,6 +64,7 @@ def test_sync_passes_through_with_dry_run():
 def test_production_factory_wires_real_adapters_without_lark_cli():
     from bitable_client import LarkCLIError
     from feishu_target import production_feishu_target
+
 
     target = production_feishu_target({"enabled": False})
     with pytest.raises(LarkCLIError) as excinfo:

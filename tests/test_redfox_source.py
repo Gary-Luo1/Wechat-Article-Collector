@@ -295,7 +295,7 @@ def test_secret_probe_classifies_keychain_failure(monkeypatch):
 
 
 def test_secret_hint_appended_to_misleading_cli_error():
-    from bitable_client import _append_secret_hint
+    from lark_runtime import _append_secret_hint
 
     plain = "lark-cli request failed: rate limited"
     assert _append_secret_hint(plain) == plain  # untouched when unrelated
@@ -620,16 +620,16 @@ def test_next_step_drives_dialogue_until_ready(isolated_home):
 
 
 def test_parse_feishu_base_url_variants():
-    import manage
+    import manage_feishu
 
-    base, table = manage._parse_feishu_base_url(
+    base, table = manage_feishu._parse_feishu_base_url(
         "https://x.feishu.cn/base/BASE123?table=tblA&view=v"
     )
     assert (base, table) == ("BASE123", "tblA")
     with pytest.raises(ValueError, match="table"):
-        manage._parse_feishu_base_url("https://x.feishu.cn/base/BASE123")
+        manage_feishu._parse_feishu_base_url("https://x.feishu.cn/base/BASE123")
     with pytest.raises(ValueError, match="base"):
-        manage._parse_feishu_base_url("https://x.feishu.cn/docs/abc")
+        manage_feishu._parse_feishu_base_url("https://x.feishu.cn/docs/abc")
 
 
 def test_wizard_bot_branch_skips_oauth(isolated_home):
