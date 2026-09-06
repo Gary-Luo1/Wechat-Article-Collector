@@ -55,6 +55,16 @@ Collect configuration in one opening dialogue before routine work starts. Run
 - when Feishu is used: identity, exact App ID, human manager, target or exact Base/table names;
 - whether standard provisioning and qualified-record sync may run automatically.
 
+Subscriptions come from the bundled default roster first: the skill ships
+`assets/default_subscriptions.json` (each entry a display name plus WeChat alias).
+Preview it with `manage subscriptions bulk-add --file
+assets/default_subscriptions.json --dry-run`, let the user strike entries and add
+their own, then apply by repeating the command without `--dry-run`. Duplicates of
+configured subscriptions are skipped, the bundled aliases need no paid account
+search, and the applied list stays user-editable through `manage subscriptions
+add/remove`. When the roster is missing or empty, collect subscriptions from the
+user directly.
+
 Show one bounded summary after these choices. Preview it with `manage
 execution-policy set ...`, ask once, then persist the same command with `--yes`.
 Configure the policy last because a later identity, App, manager, target, or schema

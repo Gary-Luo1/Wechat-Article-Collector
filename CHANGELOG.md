@@ -2,6 +2,56 @@
 
 ## 2.4.0 - Unreleased
 
+### Added (bundled default subscription roster)
+
+- The skill ships a default subscription roster at
+  `skills/wechat-article-subscriber/assets/default_subscriptions.json`
+  (each entry a display name plus WeChat alias). Configuration previews it with
+  `manage subscriptions bulk-add --file assets/default_subscriptions.json
+  --dry-run`, lets the user strike entries and add their own, then applies it
+  without `--dry-run`. Duplicates of configured subscriptions are skipped, the
+  bundled aliases need no paid account search, and the applied list stays
+  user-editable through `manage subscriptions add/remove`. An empty or missing
+  roster changes nothing: subscriptions are collected from the user directly.
+  Both installers already copy the skill `assets/` directory.
+- The roster currently ships 20 curated AI/tech accounts (resolved 2026-09-06
+  through 23 paid redfox account searches; 17 cross-checked against the
+  original `gh_`/`wxid` IDs, so same-name impostors cannot slip in).
+- `manage next`'s subscriptions stage is roster-aware: when the bundled file
+  ships alias-complete entries, the wizard proposes the free `bulk-add` preview
+  first (with its count in the question); when it is absent or empty, it falls
+  back to the previous per-account collection question.
+
+### Changed (runtime-cost and queue-size optimization)
+
+- Batch Feishu sync runs one preflight per batch instead of per record:
+  `process sync-feishu --all` computes the identity/field-mapping check once
+  and reuses it for every record (previously 4 lark-cli subprocesses per
+  record; now 4 for the batch plus 2 per record). Upsert results now flow back
+  to callers, so the previously dead "部分字段被跳过" warning actually prints.
+- `manage subscriptions add` rejects duplicates before resolving a display
+  name, so re-adding an existing subscription can no longer spend one paid
+  account-search call before failing.
+- Discovery keeps the failing account visible: when queueing a successfully
+  fetched listing fails, the account's diagnostic is recorded as
+  `blocked`/`queue_persist_failed` before the error propagates, instead of
+  vanishing from the partial-run report. `RedfoxClient.list_articles` also
+  initializes its API-code diagnostic so a zero `max_articles` call returns
+  empty instead of raising `NameError`.
+- The pre-redfox queue migration runs once: the queue carries a
+  `legacy_retired` flag so `retire_legacy_pending` stops rescanning every
+  `process` invocation.
+- `manage next`'s `paid` field is always boolean; billing nuance moves to the
+  new `paid_note` string (the subscriptions stage no longer sends a string in
+  a boolean field).
+- `manage_feishu` command handlers are imported by `manage` under their public
+  names (the leading-underscore cross-module imports are gone), and the
+  duplicated redfox online probe in `manage doctor --online` reuses
+  `manage redfox-status --verify`'s single classified implementation.
+- `modify_config` validates the mutated configuration once per transaction
+  instead of three times (load + post-mutation), sharing one persisted-write
+  helper with `save_config` so version backups are unchanged.
+
 ### Fixed (adversarial-review hardening)
 
 - `manage feishu-create-base` again extracts the created table ID: lark-cli
@@ -91,6 +141,17 @@
   its paid boundary and casual triggers.
 
 ### BREAKING
+
+- Processed queue entries no longer carry the cached article body: completion
+  strips `content` (nothing reads it afterwards and bodies dominate queue.json
+  size), dismissed entries keep it so a restore never re-pays the detail call,
+  and `process clean`/discovery cleanup migrates existing queues. `process
+  export` therefore no longer includes completed bodies. The old `process list`
+  subcommand still answers but prints a deprecation warning pointing at
+  `process inbox`.
+- Removed the unused `queue_helpers.cache_article_content` export; a read now
+  persists the fetched body and the verified-read proof in one atomic queue
+  transaction instead of two full read-modify-write cycles.
 
 - Removed dead code left by the redfox-only switch: the WeChat subscription
   resolution module, the `RequestPacer` helper, risk-control page markers, the

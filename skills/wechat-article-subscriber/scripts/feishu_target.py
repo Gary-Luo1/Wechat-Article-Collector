@@ -18,7 +18,7 @@ class FeishuTarget:
         *,
         cli_info: Callable[[], dict[str, Any]],
         preflight: Callable[[dict[str, Any]], dict[str, Any]],
-        upsert: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], bool], None],
+        upsert: Callable[..., Any],
     ) -> None:
         self._feishu = feishu
         self._cli_info = cli_info
@@ -40,14 +40,30 @@ class FeishuTarget:
         return self._preflight(self._feishu)
 
     def sync(
-        self, article: dict[str, Any], metadata: dict[str, Any], *, dry_run: bool = False
-    ) -> None:
-        """Upsert one processed article to this already-configured target."""
+        self,
+        article: dict[str, Any],
+        metadata: dict[str, Any],
+        *,
+        dry_run: bool = False,
+        preflight_result: dict[str, Any] | None = None,
+    ) -> Any:
+        """Upsert one processed article to this already-configured target.
+
+        ``preflight_result`` reuses a previous record's identity/field-mapping
+        check so batch syncs probe lark-cli once instead of per record;
+        production results carry their preflight back under ``preflight``.
+        """
         if not self._feishu.get("enabled"):
             raise LarkCLIError(
                 "Feishu sync is disabled; complete Agent setup first", kind="config"
             )
-        self._upsert(self._feishu, article, metadata, dry_run)
+        return self._upsert(
+            self._feishu,
+            article,
+            metadata,
+            dry_run=dry_run,
+            preflight_result=preflight_result,
+        )
 
 
 def production_feishu_target(feishu: dict[str, Any]) -> FeishuTarget:
@@ -56,7 +72,7 @@ def production_feishu_target(feishu: dict[str, Any]) -> FeishuTarget:
         feishu,
         cli_info=lark_cli_info,
         preflight=preflight_feishu,
-        upsert=lambda target, article, metadata, dry_run: upsert_article(
-            target, article, metadata, dry_run=dry_run
+        upsert=lambda target, article, metadata, **kwargs: upsert_article(
+            target, article, metadata, **kwargs
         ),
     )

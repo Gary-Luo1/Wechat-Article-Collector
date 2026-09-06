@@ -15,6 +15,7 @@ from bitable_client import (
     created_base_identifiers,
     feishu_identity_context,
     grant_bot_created_resource,
+    list_fields,
     preflight_feishu,
     resolve_lark_profile,
     standard_field_schema,
@@ -68,6 +69,34 @@ def _expected_app_id(config: dict[str, Any]) -> str:
     return str(config["feishu"].get("expected_app_id") or "").strip()
 
 
+def _sync_cli_profile(
+    current: dict[str, Any], *, tolerant: bool
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Pin cli_profile to the profile lark-cli actually resolves for the App ID.
+
+    Agent bindings must resolve exactly (a resolution failure is an error);
+    existing/dedicated bindings self-heal when the profile is discoverable and
+    stay silent when it is not initialized yet.
+    """
+    app_id = _expected_app_id(current)
+    if not app_id:
+        return current, None
+    try:
+        resolution = resolve_lark_profile(app_id)
+    except LarkCLIError:
+        if not tolerant:
+            raise
+        return current, None
+    if current["feishu"].get("cli_profile") == resolution["profile"]:
+        return current, resolution
+
+    def _set_profile(config: dict[str, Any]) -> dict[str, Any]:
+        config["feishu"]["cli_profile"] = resolution["profile"]
+        return config
+
+    return modify_config(_set_profile), resolution
+
+
 AGENT_SOURCE_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("openclaw", ("OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_GATEWAY_TOKEN")),
     ("hermes", ("HERMES_HOME", "HERMES_STATE_DIR")),
@@ -83,7 +112,7 @@ def _detect_agent_source() -> str:
     return ""
 
 
-def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
+def feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
     state: dict[str, Any] = {}
 
     def mutate(config: dict[str, Any]) -> dict[str, Any]:
@@ -112,7 +141,7 @@ def _feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
     }, next_action
 
 
-def _import_feishu_host_context(
+def import_feishu_host_context(
     arguments: argparse.Namespace,
 ) -> tuple[dict[str, Any], str]:
     agent_file = getattr(arguments, "agent_file", None)
@@ -228,7 +257,7 @@ def _import_feishu_host_context(
     }, "bind_detected_feishu_bot"
 
 
-def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
+def feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
     current = load_config()
     if not current["setup"]["feishu_identity_confirmed"]:
         source = _detect_agent_source()
@@ -290,39 +319,13 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
                     "context. Never infer it from the active/default lark-cli profile."
                 ),
             }, "import_current_feishu_bot_context"
-        profile_resolution = resolve_lark_profile(expected_app_id)
-        if current["feishu"].get("cli_profile") != profile_resolution["profile"]:
-            def _set_profile(config: dict[str, Any]) -> dict[str, Any]:
-                config["feishu"]["cli_profile"] = profile_resolution["profile"]
-                return config
-
-            current = modify_config(_set_profile)
-        else:
-            current = load_config()
+        current, profile_resolution = _sync_cli_profile(current, tolerant=False)
     else:
         # Existing/dedicated bindings can also drift from lark-cli's real profile
         # name (e.g. a profile created externally as cli_<app_id>). Resolve by
         # App ID and self-heal when the profile is discoverable; never error when
         # the profile is simply not initialized yet.
-        expected_app_id = _expected_app_id(current)
-        profile_resolution = None
-        if expected_app_id:
-            try:
-                profile_resolution = resolve_lark_profile(expected_app_id)
-            except LarkCLIError:
-                profile_resolution = None
-        if (
-            profile_resolution
-            and current["feishu"].get("cli_profile")
-            != profile_resolution["profile"]
-        ):
-            def _set_profile(config: dict[str, Any]) -> dict[str, Any]:
-                config["feishu"]["cli_profile"] = profile_resolution["profile"]
-                return config
-
-            current = modify_config(_set_profile)
-        else:
-            current = load_config()
+        current, profile_resolution = _sync_cli_profile(current, tolerant=True)
     context = feishu_identity_context(verify=verify)
     source = _detect_agent_source()
     saved_source = str(current["feishu"].get("agent_source") or "")
@@ -358,23 +361,21 @@ def _feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
     )
     if not context["app_id_unambiguous"]:
         return context, "select_or_initialize_feishu_profile"
-    selected = context[selected_identity]
-    ready = bool(selected["available"]) and selected["status"] == "ready"
-    if selected_identity == "user":
-        ready = ready and selected.get("token_status") in {"", "valid"}
-        if not ready:
+    ready = _identity_ready(context, selected_identity)
+    if not ready:
+        if selected_identity == "user":
             if _authorization(current)["state"] == "waiting":
                 return context, "resume_existing_user_base_authorization"
             return context, "run_feishu_auth_start"
-        return context, "reuse_existing_user_authorization_and_confirm_context"
-    if not ready:
         return context, "configure_bot_credentials_and_scopes_without_user_auth"
+    if selected_identity == "user":
+        return context, "reuse_existing_user_authorization_and_confirm_context"
     if not current["feishu"].get("manager_open_id"):
         return context, "resolve_and_save_feishu_manager"
     return context, "confirm_feishu_app_and_bot"
 
 
-def _feishu_identity(identity: str) -> dict[str, Any]:
+def feishu_identity(identity: str) -> dict[str, Any]:
     state: dict[str, Any] = {}
 
     def mutate(config: dict[str, Any]) -> dict[str, Any]:
@@ -404,7 +405,7 @@ def _feishu_identity(identity: str) -> dict[str, Any]:
     }
 
 
-def _feishu_app(app_id: str) -> dict[str, Any]:
+def feishu_app(app_id: str) -> dict[str, Any]:
     normalized = app_id.strip()
     if not re.fullmatch(r"cli_[A-Za-z0-9]+", normalized):
         raise ValueError("Feishu App ID must start with cli_ and contain only letters/digits")
@@ -474,10 +475,8 @@ def _parse_feishu_base_url(url: str) -> tuple[str, str]:
     return base_token, table_id
 
 
-def _feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+def feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     """Map an existing Base table by URL, verifying read access and fields."""
-    from bitable_client import list_fields
-
     base_token, table_id = _parse_feishu_base_url(arguments.url)
     config = load_config()
     identity = config["feishu"]["identity"]
@@ -505,7 +504,7 @@ def _feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     }, "run_feishu_context_then_authorize_only_if_needed"
 
 
-def _feishu_setup() -> tuple[dict[str, Any], str]:
+def feishu_setup() -> tuple[dict[str, Any], str]:
     """Dialogue-ready Feishu onboarding state: what to ask, what to run next.
 
     A fresh user needs no app information prepared: this command reports the
@@ -574,7 +573,7 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
     if facts["bot_manager_missing"]:
         known_user = ""
         try:
-            known_user = _authorized_user_open_id()
+            known_user = authorized_user_open_id()
         except Exception:
             known_user = ""
         state.update(
@@ -656,10 +655,8 @@ def _feishu_setup() -> tuple[dict[str, Any], str]:
     return state, "run_feishu_validation"
 
 
-def _feishu_app_secret(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+def feishu_app_secret(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     """Pipe one App Secret from stdin into the isolated lark-cli profile."""
-    from bitable_client import _run_lark, probe_app_secret_resolution
-
     config = load_config()
     app_id = _expected_app_id(config)
     if not app_id:
@@ -703,7 +700,7 @@ def _feishu_app_secret(arguments: argparse.Namespace) -> tuple[dict[str, Any], s
     )
 
 
-def _feishu_local_profile(
+def feishu_local_profile(
     arguments: argparse.Namespace,
 ) -> tuple[dict[str, Any], str]:
     """Inspect or import one existing user-level lark-cli app safely."""
@@ -791,7 +788,7 @@ def _feishu_local_profile(
     )
 
 
-def _feishu_grant_manager(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+def feishu_grant_manager(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     config = load_config()
     if not config["setup"]["feishu_identity_confirmed"]:
         raise LarkCLIError(
@@ -824,7 +821,6 @@ def _feishu_grant_manager(arguments: argparse.Namespace) -> tuple[dict[str, Any]
             raise
         # Re-running the same grant reports the manager as already present;
         # treat that as success for parity with the automatic provisioning path.
-    
     return {
         "resource_type": arguments.resource_type,
         "permission": "full_access",
@@ -834,7 +830,7 @@ def _feishu_grant_manager(arguments: argparse.Namespace) -> tuple[dict[str, Any]
     }, "continue_resource_provisioning"
 
 
-def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+def feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     config = load_config()
     if config["feishu"]["destination"] != "create":
         raise LarkCLIError(
@@ -1005,13 +1001,10 @@ def _feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], 
         "field_mapping_saved": True,
         "resumed_existing": resuming,
         "provisioning_approval_consumed": policy_authorized,
-        "authorization_source": (
-            "persisted_execution_policy" if policy_authorized else "current_command"
-        ),
     }, "none"
 
 
-def _authorized_user_open_id() -> str:
+def authorized_user_open_id() -> str:
     """Read the authorized user's Open ID from the isolated lark-cli state."""
     payload = _run_lark(["auth", "status", "--json"], retries=1)
     auth = payload.get("data", payload) if isinstance(payload, dict) else {}
@@ -1020,7 +1013,7 @@ def _authorized_user_open_id() -> str:
     return str(user.get("openId") or "").strip()
 
 
-def _feishu_manager(open_id: str) -> dict[str, Any]:
+def feishu_manager(open_id: str) -> dict[str, Any]:
     normalized = open_id.strip()
     if not normalized.startswith("ou_"):
         raise ValueError("manager Open ID must start with ou_")
@@ -1077,7 +1070,7 @@ def _save_authorization_state(
     return dict(_authorization(config))
 
 
-def _feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+def feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     config = load_config()
     if not config["setup"]["feishu_identity_confirmed"]:
         return {

@@ -37,26 +37,26 @@ from protocol import (
     NEXT_ACTIONS,
     _pipe_cmd,
     _read_secret_stdin,
-    dump,
+    emit,
     failure,
     hoist_format_flag,
     success,
 )
 from manage_feishu import (
-    _authorized_user_open_id,
-    _feishu_app,
-    _feishu_app_secret,
-    _feishu_auth,
-    _feishu_context,
-    _feishu_create_base,
-    _feishu_destination,
-    _feishu_grant_manager,
-    _feishu_identity,
-    _feishu_local_profile,
-    _feishu_manager,
-    _feishu_setup,
-    _feishu_target,
-    _import_feishu_host_context,
+    authorized_user_open_id,
+    feishu_app,
+    feishu_app_secret,
+    feishu_auth,
+    feishu_context,
+    feishu_create_base,
+    feishu_destination,
+    feishu_grant_manager,
+    feishu_identity,
+    feishu_local_profile,
+    feishu_manager,
+    feishu_setup,
+    feishu_target,
+    import_feishu_host_context,
 )
 
 
@@ -303,8 +303,6 @@ def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
 
     online_report: dict[str, Any] = {}
     if online:
-        from redfox_client import RedfoxClient
-
         api_key = config["redfox"]["api_key"].strip()
         if not api_key:
             online_report["redfox"] = {
@@ -317,17 +315,10 @@ def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
                 },
             }
         else:
-            client = RedfoxClient(api_key)
-            try:
-                # The probe only proves the key authenticates and the
-                # service answers; a code=0 response with an empty list is
-                # still a pass. Connectivity, not coverage.
-                client.query_work_list(account="probe", offset=0, count=1)
-                online_report["redfox"] = {"ok": True}
-            except Exception as exc:
-                online_report["redfox"] = {"ok": False, "error": failure(exc)["error"]}
-            finally:
-                client.close()
+            probe = _probe_redfox(api_key)
+            online_report["redfox"] = (
+                {"ok": True} if probe["reachable"] else {"ok": False, "error": probe["error"]}
+            )
         if config["feishu"]["enabled"]:
             try:
                 result = production_feishu_target(config["feishu"]).check()
@@ -459,10 +450,9 @@ def _execution_policy_command(
 def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     """Preview the full daily plan for confirmation, then run it with --yes."""
     from article_inbox import plan_digest
-    from discover_only import discover_articles
+    from discover_only import _subscription_cooldown_active, discover_articles
 
     config = load_config()
-    from discover_only import _subscription_cooldown_active
 
     interval = float(config["settings"]["check_hours"])
     subscriptions = [
@@ -528,6 +518,25 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         "digest_candidates": digest["candidates"],
     }
     return plan, "read_score_digest_candidates"
+
+
+def _bundled_roster_count() -> int:
+    """Count alias-complete entries in the bundled default roster, if shipped.
+
+    The roster seeds subscriptions during configuration; a missing, invalid, or
+    alias-free file means the skill was distributed without one and the wizard
+    falls back to collecting accounts from the user directly.
+    """
+    roster_path = Path(__file__).resolve().parent.parent / "assets" / "default_subscriptions.json"
+    try:
+        loaded = json.loads(roster_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(loaded, list):
+        return 0
+    return sum(
+        1 for item in loaded if isinstance(item, dict) and str(item.get("alias", "")).strip()
+    )
 
 
 def _next_step() -> tuple[dict[str, Any], str]:
@@ -625,22 +634,38 @@ def _next_step() -> tuple[dict[str, Any], str]:
             False,
         ),
     }
+    roster_count = _bundled_roster_count()
+    if roster_count:
+        # The shipped roster bills nothing: every entry carries its alias, so
+        # applying it skips name resolution entirely. Paid stays true because
+        # the user may still add accounts by display name (1 call each).
+        questions["subscriptions_missing"] = (
+            f"想订阅哪些公众号？可先预览内置默认名单（{roster_count} 家、均含微信号、应用免费），"
+            "确认或删减后应用；也可直接报名称或微信号（只报名称会花 1 次解析调用）",
+            "manage subscriptions bulk-add --file assets/default_subscriptions.json --dry-run",
+            "内置名单预览/应用免费；名称解析 1 次调用/个",
+        )
     if stage in {"ready_wechat_only", "ready"}:
         return {
             "stage": stage,
             "question": None,
             "command": "manage daily  （先预览，用户确认后 --yes 执行）",
-            "paid": "预览免费；执行按订阅数计费",
+            "paid": True,
+            "paid_note": "预览免费；执行按订阅数计费",
             "ready": True,
         }, "confirm_daily_run"
     question, command, paid = questions.get(
         stage, (None, "manage status", False)
     )
+    # `paid` is always boolean for the envelope contract; a string entry is a
+    # human-facing billing note carried separately.
+    paid_note = paid if isinstance(paid, str) else ""
     return {
         "stage": stage,
         "question": question or f"按诊断处理：{stage}",
         "command": command,
-        "paid": paid,
+        "paid": bool(paid_note) or bool(paid),
+        "paid_note": paid_note,
         "ready": False,
     }, action
 
@@ -670,6 +695,37 @@ def _resolve_alias_by_name(name: str) -> str:
         f"multiple accounts named {name!r}: {listing}; pick one and rerun with "
         "--alias <WECHAT_ALIAS>"
     )
+
+
+def _subscription_identities(items: list[Any]) -> set[str]:
+    return {
+        str(item.get(key, "")).strip().casefold()
+        for item in items
+        for key in ("name", "alias", "biz")
+        if str(item.get(key, "")).strip()
+    }
+
+
+def _partition_new_subscriptions(
+    existing_identities: set[str], candidates: list[dict[str, str]]
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Split candidates into (added, skipped) against the current identities.
+
+    The identity set grows as candidates are accepted, so duplicates inside one
+    batch are skipped exactly like duplicates of existing subscriptions.
+    """
+    added: list[dict[str, str]] = []
+    skipped: list[str] = []
+    for candidate in candidates:
+        identities = {value.casefold() for value in candidate.values() if value}
+        if not identities:
+            raise ValueError("subscription entries cannot be empty")
+        if identities & existing_identities:
+            skipped.append(candidate.get("name") or next(iter(candidate.values())))
+            continue
+        added.append(candidate)
+        existing_identities.update(identities)
+    return added, skipped
 
 
 def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -743,6 +799,15 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
             #    resolve it. Ambiguous names are reported, never guessed.
             if not candidate.get("name"):
                 raise ValueError("--biz alone cannot be discovered; provide --name or --alias")
+            # Reject duplicates BEFORE resolving: the atomic re-check inside
+            # mutate_add cannot refund a wasted paid search call.
+            identity = {
+                str(candidate.get(key, "")).casefold()
+                for key in ("name", "alias", "biz")
+                if candidate.get(key)
+            }
+            if identity & _subscription_identities(items):
+                raise ValueError("subscription already exists")
             resolved = _resolve_alias_by_name(candidate["name"])
             candidate["alias"] = resolved
         identity = {str(candidate.get(key, "")).casefold() for key in ("name", "alias", "biz") if candidate.get(key)}
@@ -814,50 +879,21 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
         state: dict[str, Any] = {}
 
         def mutate_bulk(config: dict[str, Any]) -> dict[str, Any]:
-            current_items = config["subscriptions"]
-            existing_identities = {
-                str(item.get(key, "")).strip().casefold()
-                for item in current_items
-                for key in ("name", "alias", "biz")
-                if str(item.get(key, "")).strip()
-            }
-            added_local: list[dict[str, str]] = []
-            skipped_local: list[str] = []
-            for candidate in normalized_candidates:
-                identities = {item.casefold() for item in candidate.values() if item}
-                if not identities:
-                    raise ValueError("subscription entries cannot be empty")
-                if identities & existing_identities:
-                    skipped_local.append(candidate.get("name") or next(iter(candidate.values())))
-                    continue
-                added_local.append(candidate)
-                existing_identities.update(identities)
-            state["added"] = added_local
-            state["skipped"] = skipped_local
-            state["total"] = len(current_items) + len(added_local)
-            current_items.extend(added_local)
+            added, skipped = _partition_new_subscriptions(
+                _subscription_identities(config["subscriptions"]), normalized_candidates
+            )
+            state["added"] = added
+            state["skipped"] = skipped
+            state["total"] = len(config["subscriptions"]) + len(added)
+            config["subscriptions"].extend(added)
             return config
 
         if not arguments.dry_run:
             modify_config(mutate_bulk)
         else:
-            existing_identities = {
-                str(item.get(key, "")).strip().casefold()
-                for item in items
-                for key in ("name", "alias", "biz")
-                if str(item.get(key, "")).strip()
-            }
-            state["added"] = []
-            state["skipped"] = []
-            for candidate in normalized_candidates:
-                identities = {item.casefold() for item in candidate.values() if item}
-                if not identities:
-                    raise ValueError("subscription entries cannot be empty")
-                if identities & existing_identities:
-                    state["skipped"].append(candidate.get("name") or next(iter(candidate.values())))
-                else:
-                    state["added"].append(candidate)
-                    existing_identities.update(identities)
+            state["added"], state["skipped"] = _partition_new_subscriptions(
+                _subscription_identities(items), normalized_candidates
+            )
         return {
             "dry_run": bool(arguments.dry_run),
             "added": state["added"],
@@ -945,26 +981,26 @@ def _key_tail(api_key: str) -> str:
 
 
 def _probe_redfox(api_key: str) -> dict[str, Any]:
-    """One paid reachability probe; classifies failures via the protocol."""
-    from redfox_client import RedfoxAuthError, RedfoxClient
+    """One paid reachability probe shared by doctor and redfox-status.
+
+    The probe only proves the key authenticates and the service answers; a
+    code=0/3203 response with an empty list is still a pass. Connectivity,
+    not coverage. Failures come back classified by the protocol layer with a
+    ready-made ``error`` envelope.
+    """
+    from redfox_client import RedfoxClient
 
     client = RedfoxClient(api_key)
     try:
-        # The probe only proves the key authenticates and the service answers;
-        # a code=0/3203 response with an empty list is still a pass.
         client.query_work_list(account="probe", offset=0, count=1)
         return {"reachable": True}
-    except RedfoxAuthError as exc:
-        return {
-            "reachable": False,
-            "error_code": "REDFOX_AUTH",
-            "message": str(exc)[:200],
-        }
     except Exception as exc:  # classified by the protocol layer
+        error = failure(exc)["error"]
         return {
             "reachable": False,
-            "error_code": getattr(exc, "code", type(exc).__name__),
-            "message": str(exc)[:200],
+            "error_code": error["code"],
+            "message": error["message"],
+            "error": error,
         }
     finally:
         client.close()
@@ -1021,8 +1057,12 @@ def _redfox_status(*, verify: bool = False) -> tuple[dict[str, Any], str]:
         "key_tail": _key_tail(api_key),
     }
     if api_key and verify:
-        # One paid call; only on explicit request.
-        data.update(_probe_redfox(api_key))
+        # One paid call; only on explicit request. The ready-made error
+        # envelope is consumed by main()'s failure path, not echoed in data.
+        probe = _probe_redfox(api_key)
+        data.update(
+            {key: value for key, value in probe.items() if key != "error"}
+        )
         data["billed"] = 1
     elif api_key:
         data["reachable"] = None  # not checked; pass --verify for a live probe
@@ -1170,8 +1210,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands.add_parser("status")
     commands.add_parser("feishu-setup")
-    feishu_target = commands.add_parser("feishu-target")
-    feishu_target.add_argument("--url", required=True, help="Feishu base URL of the exact table")
+    feishu_target_parser = commands.add_parser("feishu-target")
+    feishu_target_parser.add_argument("--url", required=True, help="Feishu base URL of the exact table")
     commands.add_parser("next")
     app_secret = commands.add_parser("feishu-app-secret")
     app_secret.add_argument("--app-id", default="", help="optional; must match the confirmed App ID")
@@ -1346,18 +1386,18 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.online:
                 failed = _failed_online_envelope(data)
                 if failed is not None:
-                    print(dump(failed) if arguments.format == "json" else json.dumps(failed, ensure_ascii=False, indent=2))
+                    emit(failed, json_output=arguments.format == "json")
                     return 1
         elif arguments.command == "status":
             data, next_action = _status()
         elif arguments.command == "feishu-setup":
-            data, next_action = _feishu_setup()
+            data, next_action = feishu_setup()
         elif arguments.command == "feishu-target":
-            data, next_action = _feishu_target(arguments)
+            data, next_action = feishu_target(arguments)
         elif arguments.command == "next":
             data, next_action = _next_step()
         elif arguments.command == "feishu-app-secret":
-            data, next_action = _feishu_app_secret(arguments)
+            data, next_action = feishu_app_secret(arguments)
         elif arguments.command == "daily":
             data, next_action = _daily(arguments)
         elif arguments.command == "redfox-set-key":
@@ -1378,43 +1418,43 @@ def main(argv: list[str] | None = None) -> int:
                         "next_action": NEXT_ACTIONS.get(code, "inspect_command_help"),
                     },
                 }
-                print(dump(envelope) if arguments.format == "json" else json.dumps(envelope, ensure_ascii=False, indent=2))
+                emit(envelope, json_output=arguments.format == "json")
                 return 1
         elif arguments.command == "config-show":
             data = redacted_config(load_config())
         elif arguments.command == "execution-policy":
             data, next_action = _execution_policy_command(arguments)
         elif arguments.command == "feishu-destination":
-            data, next_action = _feishu_destination(arguments.mode)
+            data, next_action = feishu_destination(arguments.mode)
         elif arguments.command == "feishu-host-context":
-            data, next_action = _import_feishu_host_context(arguments)
+            data, next_action = import_feishu_host_context(arguments)
         elif arguments.command == "feishu-context":
-            data, next_action = _feishu_context(verify=arguments.verify)
+            data, next_action = feishu_context(verify=arguments.verify)
         elif arguments.command == "feishu-identity":
-            data = _feishu_identity(arguments.identity)
+            data = feishu_identity(arguments.identity)
             next_action = "run_feishu_context_then_authorize_only_if_needed"
         elif arguments.command == "feishu-app":
-            data = _feishu_app(arguments.app_id)
+            data = feishu_app(arguments.app_id)
             next_action = "reuse_or_configure_private_lark_profile"
         elif arguments.command == "feishu-local-profile":
-            data, next_action = _feishu_local_profile(arguments)
+            data, next_action = feishu_local_profile(arguments)
         elif arguments.command == "feishu-manager":
             open_id = arguments.open_id or ""
             if arguments.from_authorized_user:
-                open_id = _authorized_user_open_id()
+                open_id = authorized_user_open_id()
                 if not open_id:
                     raise ValueError(
                         "no authorized personal-identity user found; run a user "
                         "authorization first or pass --open-id"
                     )
-            data = _feishu_manager(open_id)
+            data = feishu_manager(open_id)
             next_action = "confirm_feishu_app_and_bot"
         elif arguments.command == "feishu-grant-manager":
-            data, next_action = _feishu_grant_manager(arguments)
+            data, next_action = feishu_grant_manager(arguments)
         elif arguments.command == "feishu-create-base":
-            data, next_action = _feishu_create_base(arguments)
+            data, next_action = feishu_create_base(arguments)
         elif arguments.command == "feishu-auth":
-            data, next_action = _feishu_auth(arguments)
+            data, next_action = feishu_auth(arguments)
         elif arguments.command == "subscriptions":
             data = _subscriptions(arguments)
             if arguments.subscription_command == "add":
@@ -1445,11 +1485,11 @@ def main(argv: list[str] | None = None) -> int:
             # a destructive preview by default would hide dispatch mistakes.
             raise ValueError(f"unhandled manage command: {arguments.command}")
         envelope = success(data, next_action=next_action)
-        print(dump(envelope) if arguments.format == "json" else json.dumps(envelope, ensure_ascii=False, indent=2))
+        emit(envelope, json_output=arguments.format == "json")
         return 0
     except Exception as exc:
         envelope = failure(exc)
-        print(dump(envelope) if arguments.format == "json" else json.dumps(envelope, ensure_ascii=False, indent=2))
+        emit(envelope, json_output=arguments.format == "json")
         return 1
 
 

@@ -1620,7 +1620,7 @@ def test_sync_json_preserves_non_retryable_lark_failure(
         sync_status="pending",
     )
 
-    def fail_sync(entry, *, dry_run=False):
+    def fail_sync(entry, *, dry_run=False, preflight_result=None):
         raise LarkCLIError("Base permission is missing", kind="permission")
 
     monkeypatch.setattr(process_pending, "_sync_entry", fail_sync)
@@ -2019,7 +2019,7 @@ def test_wizard_provisioning_command_never_suggests_bare_create_yes(
         lark_cli_config_dir() / "config.json",
         {"apps": [{"name": "p1", "appId": "cli_x", "appSecret": {"source": "keychain", "id": "k1"}}]},
     )
-    state, action = manage._feishu_setup()
+    state, action = manage.feishu_setup()
     assert action == "provision_configured_feishu_base"
     command = state["next_command"]
     assert "feishu-create-base --name <名称> --table-name <表名>" in command
@@ -2313,5 +2313,5 @@ def test_agent_binding_skips_app_secret_gate(monkeypatch: pytest.MonkeyPatch):
     from config_store import save_config
 
     save_config(config)
-    state, action = manage._feishu_setup()
+    state, action = manage.feishu_setup()
     assert action != "provide_app_secret_for_private_profile"

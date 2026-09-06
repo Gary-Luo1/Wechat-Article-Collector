@@ -52,14 +52,15 @@ def test_feishu_target_owns_cli_check_preflight_and_sync_calls():
         {"enabled": True, "identity": "bot"},
         cli_info=lambda: {"compatible": True, "version": "1.0.69"},
         preflight=lambda feishu: calls.append(("preflight", feishu)) or {"mapping": {}},
-        upsert=lambda feishu, article, metadata, dry_run: calls.append(
-            ("upsert", feishu, article, metadata, dry_run)
+        upsert=lambda feishu, article, metadata, **kwargs: calls.append(
+            ("upsert", feishu, article, metadata, kwargs)
         ),
     )
 
     assert target.check() == {"mapping": {}}
     target.sync({"title": "Article"}, {"score": 8.0}, dry_run=True)
     assert [call[0] for call in calls] == ["preflight", "upsert"]
+    assert calls[1][4] == {"dry_run": True, "preflight_result": None}
 
 
 class TestConfig:
@@ -291,6 +292,78 @@ class TestQueue:
         assert entry["article"]["title"] == "Article a"
         assert [item["title"] for item in queue["pending"]] == ["Article b"]
         assert next(iter(queue["processed"].values()))["metadata"]["score"] == 8
+
+    def test_completion_strips_cached_body_but_dismiss_keeps_it(self):
+        from queue_helpers import (
+            add_pending,
+            complete_article,
+            dismiss_article,
+            read_queue,
+        )
+
+        add_pending([article("a"), article("b")])
+        complete_article(article("a")["link"], {"score": 8})
+        dismiss_article(article("b")["link"])
+        processed = read_queue()["processed"]
+        completed = next(
+            entry
+            for entry in processed.values()
+            if entry["metadata"].get("score") is not None
+        )
+        dismissed = next(
+            entry
+            for entry in processed.values()
+            if entry["metadata"].get("disposition") == "dismissed"
+        )
+        # Completed entries never read the body again; dismissed entries must
+        # keep it so a restore never re-pays the detail call.
+        assert "content" not in completed["article"]
+        assert dismissed["article"]["content"] == "Article body b"
+
+    def test_cleanup_migrates_bodies_out_of_terminal_processed_entries(self):
+        from datetime import datetime, timezone
+
+        from paths import queue_path, secure_write_json
+        from queue_helpers import cleanup_processed, read_queue
+        from url_identity import normalize_article_url
+
+        completed = article("z")
+        dismissed = article("y", verified=False)
+        now = datetime.now(timezone.utc).isoformat()
+        secure_write_json(
+            queue_path(),
+            {
+                "version": 1,
+                "pending": [],
+                "processed": {
+                    normalize_article_url(completed["link"]): {
+                        "article": {
+                            **completed,
+                            "normalized_url": normalize_article_url(completed["link"]),
+                        },
+                        "processed_at": now,
+                        "sync_status": "synced",
+                        "metadata": {"score": 8},
+                    },
+                    normalize_article_url(dismissed["link"]): {
+                        "article": {
+                            **dismissed,
+                            "normalized_url": normalize_article_url(dismissed["link"]),
+                        },
+                        "processed_at": now,
+                        "sync_status": "not_requested",
+                        "metadata": {"disposition": "dismissed"},
+                    },
+                },
+            },
+        )
+        assert cleanup_processed(365) == 0
+        processed = read_queue()["processed"]
+        assert "content" not in processed[normalize_article_url(completed["link"])]["article"]
+        assert (
+            processed[normalize_article_url(dismissed["link"])]["article"]["content"]
+            == "Article body y"
+        )
 
     def test_update_sync_status_refuses_dismissed_entries(self):
         from queue_helpers import add_pending, dismiss_article, update_sync_status
@@ -903,6 +976,38 @@ class TestProcess:
         queue = read_queue()
         assert [item["title"] for item in queue["pending"]] == ["Article b"]
         assert next(iter(queue["processed"].values()))["article"]["title"] == "Article a"
+
+    def test_sync_all_reuses_one_preflight_for_the_batch(self):
+        import process_pending
+        from queue_helpers import add_pending, complete_article, pending_sync_entries
+
+        self.valid_config(feishu=True)
+        add_pending([article("a"), article("b")])
+        for item in (article("a"), article("b")):
+            complete_article(item["link"], {"score": 8}, sync_status="pending")
+        assert len(pending_sync_entries()) == 2
+
+        seen: list[dict | None] = []
+
+        def fake_upsert(feishu, art, metadata, *, dry_run=False, preflight_result=None):
+            seen.append(preflight_result)
+            return {"updated": False, "skipped_fields": [], "preflight": {"marker": "shared"}}
+
+        with mock.patch("feishu_target.upsert_article", side_effect=fake_upsert):
+            assert process_pending.main(["sync-feishu", "--all"]) == 0
+        # First record computes the preflight; later records reuse it instead
+        # of re-running the lark-cli identity/field probes per record.
+        assert seen[0] is None
+        assert seen[1] == {"marker": "shared"}
+
+    def test_list_warns_it_is_deprecated(self, capsys):
+        import process_pending
+        from queue_helpers import add_pending
+
+        self.valid_config()
+        add_pending([article("a")])
+        assert process_pending.main(["list"]) == 0
+        assert "Deprecated" in capsys.readouterr().err
 
     def test_local_completion_does_not_require_config(self):
         from process_pending import main

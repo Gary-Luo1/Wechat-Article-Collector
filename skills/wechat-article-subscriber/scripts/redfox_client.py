@@ -332,6 +332,7 @@ class RedfoxClient:
         seen_links: set[str] = set()
         offset = 0
         pages = 0
+        api_code = 0
         empty_reason = "exhausted"
         max_pages = (max_articles + page_size - 1) // page_size + 2
         while len(collected) < max_articles and pages < max_pages:

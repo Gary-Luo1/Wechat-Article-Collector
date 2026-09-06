@@ -123,8 +123,6 @@ NUMERIC_TYPES = {
 }
 
 
-
-
 def standard_field_schema() -> list[dict[str, Any]]:
     """Return the current field JSON for a newly authorized Base/table."""
     fields: list[dict[str, Any]] = []
@@ -138,8 +136,6 @@ def standard_field_schema() -> list[dict[str, Any]]:
             }
         )
     return fields
-
-
 
 
 def probe_app_secret_resolution() -> dict[str, Any]:
@@ -898,8 +894,15 @@ def upsert_article(
     metadata: dict[str, Any],
     *,
     dry_run: bool = False,
+    preflight_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    check = preflight_feishu(feishu)
+    """Upsert one article, reusing a batch caller's preflight when provided.
+
+    A preflight costs several lark-cli subprocess probes (identity verify +
+    field listing) whose result cannot change between records of one batch,
+    so sync loops pass the previous record's ``preflight`` back in.
+    """
+    check = preflight_result if preflight_result is not None else preflight_feishu(feishu)
     mapping = check["resolved"]
     record, skipped_fields = build_mapped_record(article, metadata, mapping)
     url_target = mapping["url"]
@@ -944,4 +947,5 @@ def upsert_article(
     return {
         "updated": bool(record_id),
         "skipped_fields": skipped_fields,
+        "preflight": check,
     }

@@ -80,6 +80,7 @@ Subscription maintenance is local and explicit:
 
 ```text
 manage subscriptions list
+manage subscriptions bulk-add --file assets/default_subscriptions.json --dry-run
 manage subscriptions add --name <EXACT_NAME>
 manage subscriptions bulk-add --name <NAME> --name <NAME> --dry-run
 manage subscriptions bulk-add --file <NAMES.txt-or-JSON> --dry-run
@@ -89,7 +90,11 @@ manage subscriptions remove <NAME_OR_ALIAS_OR_BIZ>
 Ambiguous search results require user choice. A missing result is not silently removed.
 `bulk-add` accepts repeated names, newline-delimited UTF-8 text, or a JSON array of
 names/objects. It validates the whole batch before one atomic save, skips existing
-identities, caps a batch at 100, and supports a non-mutating dry run.
+identities, caps a batch at 100, and supports a non-mutating dry run. The bundled
+default roster (`assets/default_subscriptions.json`) seeds this list during
+configuration: preview it with `--dry-run`, let the user strike entries and add
+their own, then apply — every roster entry carries its alias, so applying it bills
+nothing and needs no account search.
 
 ## Article inbox
 
@@ -193,6 +198,6 @@ Machine-readable commands return one JSON object:
 {"ok":true,"data":{},"next_action":"none"}
 ```
 
-Failures use `error.code`, a redacted `message`, `retryable`, and `next_action`. Agents should branch on the code, not parse human prose. Current code families: `REDFOX_AUTH` (re-enter the key), `REDFOX_RATE_LIMITED`/`REDFOX_TRANSIENT` (the only retryable ones), `REDFOX_API_ERROR` (upstream code in details), `ARTICLE_READ_REQUIRED`, `ARTICLE_NOT_FOUND`, `ARTICLE_NOT_SYNCABLE` (dismissed/legacy entries have nothing to sync), `LARK_*` (Feishu CLI classification), `CONFIG_ERROR`, and `INVALID_ARGUMENT`. A failed discovery response can include safe `meta` counts for preserved partial progress. `manage doctor --online` and `manage redfox-status --verify` return `ok:false` with exit code 1 when an online check fails, while keeping the full report under `data`. `process` accepts global formatting before the subcommand: `process --format json list`; `manage` accepts `--format` before or after its subcommand (`manage doctor --format json`).
+Failures use `error.code`, a redacted `message`, `retryable`, and `next_action`. Agents should branch on the code, not parse human prose. Current code families: `REDFOX_AUTH` (re-enter the key), `REDFOX_RATE_LIMITED`/`REDFOX_TRANSIENT` (the only retryable ones), `REDFOX_API_ERROR` (upstream code in details), `ARTICLE_READ_REQUIRED`, `ARTICLE_NOT_FOUND`, `ARTICLE_NOT_SYNCABLE` (dismissed/legacy entries have nothing to sync), `LARK_*` (Feishu CLI classification), `CONFIG_ERROR`, and `INVALID_ARGUMENT`. A failed discovery response can include safe `meta` counts for preserved partial progress. `manage doctor --online` and `manage redfox-status --verify` return `ok:false` with exit code 1 when an online check fails, while keeping the full report under `data`. `process` accepts global formatting before the subcommand: `process --format json inbox` (the old `list` subcommand still answers but prints a deprecation warning); `manage` accepts `--format` before or after its subcommand (`manage doctor --format json`).
 
 Configuration format changes are versioned. The first migration preserves a restricted `config.vN.backup.json`; `manage reset --scope all-data --yes` removes these backups too.

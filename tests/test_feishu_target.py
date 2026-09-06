@@ -12,7 +12,7 @@ def make_target(feishu=None, cli=None, preflight=None, upsert=None):
         feishu if feishu is not None else {"enabled": True},
         cli_info=cli or (lambda: {"compatible": True, "version": "1.0.69"}),
         preflight=preflight or (lambda feishu: {"identity": "user", "mapping": {}}),
-        upsert=upsert or (lambda feishu, article, metadata, dry_run=False: None),
+        upsert=upsert or (lambda feishu, article, metadata, **kwargs: None),
     )
 
 
@@ -53,12 +53,25 @@ def test_sync_disabled_raises_config_kind():
 def test_sync_passes_through_with_dry_run():
     calls: list[tuple] = []
 
-    def upsert(feishu, article, metadata, dry_run=False):
-        calls.append((article, metadata, dry_run))
+    def upsert(feishu, article, metadata, dry_run=False, preflight_result=None):
+        calls.append((article, metadata, dry_run, preflight_result))
 
     target = make_target(upsert=upsert)
     target.sync({"title": "a"}, {"score": 8.0}, dry_run=True)
-    assert calls == [({"title": "a"}, {"score": 8.0}, True)]
+    assert calls == [({"title": "a"}, {"score": 8.0}, True, None)]
+
+
+def test_sync_forwards_reusable_preflight_to_upsert():
+    calls: list[tuple] = []
+
+    def upsert(feishu, article, metadata, dry_run=False, preflight_result=None):
+        calls.append(preflight_result)
+        return {"skipped_fields": [], "preflight": preflight_result}
+
+    shared = {"identity": "user", "resolved": {}}
+    target = make_target(upsert=upsert)
+    target.sync({"title": "a"}, {}, preflight_result=shared)
+    assert calls == [shared]
 
 
 def test_production_factory_wires_real_adapters_without_lark_cli():

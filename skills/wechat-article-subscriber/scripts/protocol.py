@@ -96,6 +96,20 @@ def dump(envelope: dict[str, Any]) -> str:
     return json.dumps(envelope, ensure_ascii=False)
 
 
+def emit(
+    envelope: dict[str, Any], *, json_output: bool, text: str | None = None
+) -> None:
+    """Print the machine envelope for agents, or its human-readable form.
+
+    The default text form is the pretty-printed envelope, so commands whose
+    human output is "the same JSON, indented" need no text argument.
+    """
+    if json_output:
+        print(dump(envelope))
+    else:
+        print(text if text is not None else json.dumps(envelope, ensure_ascii=False, indent=2))
+
+
 def hoist_format_flag(argv: list[str]) -> list[str]:
     """Allow `--format json|text` after the subcommand, like process/discover.
 

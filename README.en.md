@@ -59,7 +59,7 @@ bash install.sh --target agents
 
 1. Create an API key at [redfox.hk](https://redfox.hk/) (pay-per-call)
 2. Restart/open the Agent and say: **配置微信公众号文章订阅**
-3. Fill in Key, subscriptions (account name + WeChat alias), time window, Feishu destination (skip / map / create)
+3. Fill in Key, subscriptions (preview/apply a bundled 20-account default roster for free, or add your own account name + WeChat alias), time window, Feishu destination (skip / map / create)
 4. Confirm the execution policy once — then discover → read → score → queue → (optional) sync
 
 > Pass secrets via stdin / local hidden input / controlled inbox — **never** CLI args, repo files, or logs. Local `config.json` is plaintext; do not commit it.

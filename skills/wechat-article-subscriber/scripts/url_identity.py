@@ -46,22 +46,10 @@ def is_wechat_article_url(url: str) -> bool:
 
 def canonicalize_wechat_article_url(url: str) -> str:
     """Upgrade an exact-host HTTP article URL and enforce the allowlist."""
-    try:
-        parsed = urllib.parse.urlsplit(url)
-        if (
-            parsed.scheme == "http"
-            and (parsed.hostname or "").lower() == ALLOWED_HOST
-            and parsed.username is None
-            and parsed.password is None
-            and parsed.port is None
-        ):
-            parsed = parsed._replace(scheme="https")
-            url = urllib.parse.urlunsplit(parsed)
-    except (TypeError, UnicodeError, ValueError):
-        pass
-    if not is_wechat_article_url(url):
+    upgraded = upgrade_wechat_article_url(url)
+    if not is_wechat_article_url(upgraded):
         raise ValueError("only https://mp.weixin.qq.com/s article URLs are allowed")
-    return url
+    return upgraded
 
 
 def normalize_article_url(url: str) -> str:
@@ -76,6 +64,7 @@ def normalize_article_url(url: str) -> str:
     port = parsed.port
     netloc = host if port is None else f"{host}:{port}"
     path = re.sub(r"/{2,}", "/", parsed.path or "/").rstrip("/") or "/"
+    query = ""
     if host == ALLOWED_HOST and path in {"/s", "/s/"}:
         params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         ordered = []
@@ -83,10 +72,6 @@ def normalize_article_url(url: str) -> str:
             if key in params and params[key]:
                 ordered.append((key, params[key][0]))
         query = urllib.parse.urlencode(ordered)
-    elif host == ALLOWED_HOST and path.startswith("/s/"):
-        query = ""
-    else:
-        query = ""
     return urllib.parse.urlunsplit((scheme, netloc, path, query, ""))
 
 

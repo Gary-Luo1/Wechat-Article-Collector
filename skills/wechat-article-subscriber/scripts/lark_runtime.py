@@ -121,24 +121,17 @@ def resolve_lark_cli() -> Path:
     )
 
 
+_EMPTY_BINDING = {"app_id": "", "profile": "", "binding_mode": "", "agent_source": ""}
+
+
 def _runtime_binding() -> dict[str, str]:
     try:
         raw = json.loads(config_path().read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
-        return {
-            "app_id": "",
-            "profile": "",
-            "binding_mode": "",
-            "agent_source": "",
-        }
+        return dict(_EMPTY_BINDING)
     feishu = raw.get("feishu") if isinstance(raw, dict) else None
     if not isinstance(feishu, dict):
-        return {
-            "app_id": "",
-            "profile": "",
-            "binding_mode": "",
-            "agent_source": "",
-        }
+        return dict(_EMPTY_BINDING)
     return {
         "app_id": str(feishu.get("expected_app_id") or "").strip(),
         "profile": str(feishu.get("cli_profile") or "").strip(),
@@ -788,19 +781,8 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
             for marker in ("timeout", "temporarily", "connection reset", "rate limit", "try again")
         )
     )
-    final_message = combined
-    if message.strip() in ("", "lark-cli request failed") and not any(
-        part for part in (subtype, hint, violations_text, console_url)
-    ):
-        # Some failures (e.g. a rejected App Secret during config init) return a
-        # JSON payload without message/msg fields; include a redacted snippet so
-        # the agent can see the underlying cause instead of a bare generic text.
-        snippet = _redact_cli_error(
-            json.dumps(payload, ensure_ascii=False)[:400], args
-        ).strip()
-        final_message = f"lark-cli request failed | raw response: {snippet}"
     return LarkCLIError(
-        _redact_cli_error(final_message or "lark-cli request failed", args),
+        _redact_cli_error(combined or "lark-cli request failed", args),
         kind="transient" if retryable else "api",
         code=code,
         retryable=retryable,

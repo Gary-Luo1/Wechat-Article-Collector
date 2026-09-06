@@ -149,8 +149,15 @@ def discover_articles(
                     if on_account_articles is not None:
                         diagnostic["queued"] = on_account_articles(account_articles)
                 except Exception:
+                    # Record the failing account before the exception unrolls,
+                    # or the partial-run report loses its blocking diagnosis.
+                    diagnostic["status"] = "blocked"
+                    diagnostic["error"] = "queue_persist_failed"
+                    if diagnostics is not None:
+                        diagnostics.append(diagnostic)
                     # The paid listing already succeeded; arm the cooldown so a
-                    # persistent queue failure cannot re-charge every cycle.
+                    # persistent queue failure cannot re-charge every cycle. If
+                    # this write fails too, its error replaces the queue error.
                     _mark_subscription_discovered((name, alias, biz), config_path)
                     raise
                 discovered.extend(account_articles)

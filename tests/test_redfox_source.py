@@ -320,6 +320,51 @@ def test_no_data_result_reports_unresolved_and_skips_cooldown(isolated_home, mon
     assert "last_discovered_at" not in load_config()["subscriptions"][0]
 
 
+def test_queue_failure_reports_blocking_account_in_diagnostics(
+    isolated_home, monkeypatch
+):
+    from config_store import load_config, save_config
+
+    save_config(_config())
+    fake = _FakeArticlesClient(
+        [
+            {
+                "title": "t",
+                "link": "https://mp.weixin.qq.com/s?__biz=1&mid=1&idx=1&sn=diag1",
+                "digest": "",
+                "work_uuid": "U",
+                "publish_time_raw": "",
+                "update_time": int(time.time()),
+            }
+        ],
+        {"pages": 1, "empty_reason": "exhausted", "api_code": 2000},
+    )
+    monkeypatch.setattr("discover_only.RedfoxClient", lambda *a, **k: fake)
+
+    def failing_persist(articles):
+        raise ValueError("queue is invalid; preserved as quarantine")
+
+    diagnostics: list[dict] = []
+    with pytest.raises(ValueError):
+        discover_articles(load_config(), 24, None, diagnostics, failing_persist)
+    # The failing account must stay visible in the partial-run report.
+    assert diagnostics[-1]["account"] == "人民日报"
+    assert diagnostics[-1]["status"] == "blocked"
+    assert diagnostics[-1]["error"] == "queue_persist_failed"
+
+
+def test_list_articles_with_zero_max_articles_returns_empty(isolated_home):
+    from redfox_client import RedfoxClient
+
+    client = RedfoxClient("k")
+    try:
+        articles, info = client.list_articles(account="a", max_articles=0)
+        assert articles == []
+        assert info["api_code"] == 0
+    finally:
+        client.close()
+
+
 class _FakeArticlesClient:
     def __init__(self, articles, info):
         self.articles = articles
@@ -449,6 +494,26 @@ def test_uncrawled_article_gets_specific_guidance(isolated_home, monkeypatch):
         process_pending._print_article(get_pending()[0])
 
 
+def test_add_duplicate_name_rejected_before_paid_resolution(
+    isolated_home, monkeypatch
+):
+    import manage
+    from config_store import save_config
+
+    cfg = _config()
+    cfg["subscriptions"] = [{"name": "量子位", "alias": "QbitAI"}]
+    save_config(cfg)
+
+    def explode(self, keyword):
+        raise AssertionError("duplicate add must not spend a paid search call")
+
+    monkeypatch.setattr("redfox_client.RedfoxClient.search_accounts", explode)
+    with pytest.raises(ValueError, match="already exists"):
+        manage._subscriptions(
+            types_simple_namespace(subscription_command="add", name="量子位", alias="", biz="")
+        )
+
+
 def test_add_resolves_name_to_alias_via_search(isolated_home, monkeypatch):
     import manage
     from config_store import save_config
@@ -529,13 +594,13 @@ def test_feishu_setup_guides_fresh_user_step_by_step(isolated_home):
     base["setup"]["feishu_identity_confirmed"] = False
     save_config(base)
 
-    state, action = manage._feishu_setup()
+    state, action = manage.feishu_setup()
     assert action == "ask_feishu_identity_before_authorization"
     assert state["next_command"].startswith("manage feishu-identity")
 
     base["setup"]["feishu_identity_confirmed"] = True
     save_config(base)
-    state, action = manage._feishu_setup()
+    state, action = manage.feishu_setup()
     assert action == "select_feishu_app"
     assert "create_app_guide" in state  # console guidance for a brand-new app
 
@@ -550,14 +615,14 @@ def test_feishu_app_secret_requires_bound_matching_app(isolated_home, monkeypatc
     save_config(cfg)
 
     with pytest.raises(ValueError, match="does not match"):
-        manage._feishu_app_secret(types_simple_namespace(app_id="cli_other"))
+        manage.feishu_app_secret(types_simple_namespace(app_id="cli_other"))
     # Empty stdin -> the secret is refused before anything is sent to lark-cli.
     import io
 
     monkeypatched_stdin = io.StringIO("")
     monkeypatch.setattr("sys.stdin", monkeypatched_stdin)
     with pytest.raises(ValueError, match="App Secret is empty"):
-        manage._feishu_app_secret(types_simple_namespace(app_id=""))
+        manage.feishu_app_secret(types_simple_namespace(app_id=""))
 
 
 def test_redfox_set_key_seeds_missing_config(isolated_home, monkeypatch):
@@ -619,6 +684,43 @@ def test_next_step_drives_dialogue_until_ready(isolated_home):
     assert "redfox.hk" in state["question"]
 
 
+def test_next_step_paid_field_is_boolean_with_optional_note(isolated_home):
+    import manage
+    from config_store import save_config
+
+    cfg = _config()
+    cfg["setup"]["search_window_confirmed"] = True
+    cfg["subscriptions"] = []  # stage: subscriptions_missing
+    save_config(cfg)
+    state, _ = manage._next_step()
+    assert isinstance(state["paid"], bool)
+    assert state["paid"] is True  # name-mode resolution still bills one call
+    if manage._bundled_roster_count():
+        # Shipped roster: the wizard proposes the free bulk-add preview first.
+        assert "内置默认名单" in state["question"]
+        assert state["command"] == (
+            "manage subscriptions bulk-add --file assets/default_subscriptions.json --dry-run"
+        )
+        assert state["paid_note"] == "内置名单预览/应用免费；名称解析 1 次调用/个"
+    else:
+        assert state["paid_note"] == "名称模式 1 次调用/个"
+
+
+def test_next_step_subscriptions_stage_falls_back_without_roster(isolated_home, monkeypatch):
+    import manage
+    from config_store import save_config
+
+    cfg = _config()
+    cfg["setup"]["search_window_confirmed"] = True
+    cfg["subscriptions"] = []
+    save_config(cfg)
+    monkeypatch.setattr(manage, "_bundled_roster_count", lambda: 0)
+    state, _ = manage._next_step()
+    assert state["question"].startswith("想订阅哪些公众号？直接报名称或微信号")
+    assert state["command"] == "manage subscriptions add --name <名称> [--alias <微信号>]"
+    assert state["paid_note"] == "名称模式 1 次调用/个"
+
+
 def test_parse_feishu_base_url_variants():
     import manage_feishu
 
@@ -651,7 +753,7 @@ def test_wizard_bot_branch_skips_oauth(isolated_home):
     save_config(cfg)
     # Without an App Secret in the isolated profile the wizard must collect it
     # first; otherwise later stages would suggest commands that dead-end.
-    state, action = manage._feishu_setup()
+    state, action = manage.feishu_setup()
     assert action == "provide_app_secret_for_private_profile"
     assert "feishu-app-secret" in state["next_command"]
     assert "App Secret" in state["next_question"]
@@ -662,7 +764,7 @@ def test_wizard_bot_branch_skips_oauth(isolated_home):
         lark_cli_config_dir() / "config.json",
         {"apps": [{"name": "p1", "appId": "cli_x", "appSecret": "inline-secret"}]},
     )
-    state, action = manage._feishu_setup()
+    state, action = manage.feishu_setup()
     assert action == "resolve_and_save_feishu_manager"
     assert "不需要扫码" in state["next_question"]
     assert state["profile_secret_ready"] is True
@@ -761,7 +863,7 @@ def test_feishu_setup_existing_without_target_asks_for_url(isolated_home):
     cfg["setup"]["feishu_authorization"]["state"] = "authorized"
     cfg["setup"]["feishu_authorization"]["identity"] = "user"
     save_config(cfg)
-    state, action = manage._feishu_setup()
+    state, action = manage.feishu_setup()
     assert action == "configure_existing_feishu_target"
     assert "feishu-target --url" in state["next_command"]
 

@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,6 @@ from execution_policy import autopilot_policy, invalidate_for_feishu_change
 from feishu_target import production_feishu_target
 from protocol import dump, failure, success
 from queue_helpers import (
-    cache_article_content,
     normalize_url,
     read_queue,
     cleanup_processed,
@@ -96,18 +96,20 @@ def _resolve(arguments: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_list(account: str | None = None) -> int:
+    # Superseded by `inbox`; kept only so existing automation keeps working.
+    print("Deprecated: use `process inbox` for the filtered, sortable view.", file=sys.stderr)
     pending = get_pending()
-    selected = [item for item in pending if not account or item.get("account") == account]
-    if not selected:
-        print("No pending articles")
-        return 0
+    matched = False
     for index, article in enumerate(pending, start=1):
-        if article not in selected:
+        if account and article.get("account") != account:
             continue
+        matched = True
         print(f"[{index}] {article.get('title', '')}")
         print(f"    id: {article.get('id', '')}")
         print(f"    account: {article.get('account', '')}")
         print(f"    url: {article.get('link', '')}")
+    if not matched:
+        print("No pending articles")
     return 0
 
 
@@ -209,11 +211,15 @@ def cmd_digest_plan(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def _load_article_text(article: dict[str, Any]) -> str:
-    """Return the cached body, or fetch it once via the paid detail endpoint."""
+def _load_article_text(article: dict[str, Any]) -> tuple[str, bool]:
+    """Return (body, was_cached); fetches once via the paid detail endpoint.
+
+    The fetched body is not written here: the caller persists it together with
+    the verified-read proof in one queue transaction.
+    """
     cached = str(article.get("content") or "").strip()
     if cached:
-        return cached
+        return cached, True
     work_uuid = str(article.get("work_uuid") or "").strip()
     if not work_uuid:
         raise ValueError(
@@ -242,9 +248,7 @@ def _load_article_text(article: dict[str, Any]) -> str:
             "redfox returned no content for this article; dismiss it or contact "
             "the data source — retrying will not help"
         )
-    # Cache so re-reads never pay for the same body twice.
-    cache_article_content(str(article["link"]), text)
-    return text
+    return text, False
 
 
 def _print_article(article: dict[str, Any]) -> tuple[str, bool]:
@@ -263,7 +267,7 @@ def _print_article_unprotected(article: dict[str, Any]) -> tuple[str, bool]:
     print(f"Account: {article.get('account', '')}")
     print(f"URL: {article.get('link', '')}")
     print(f"Digest: {article.get('digest', '')}")
-    text = _load_article_text(article)
+    text, was_cached = _load_article_text(article)
     # The nonce makes the untrusted-content boundary impossible to forge from
     # inside the body (a plain fixed marker could be echoed by a malicious
     # article to fake trusted trailing output).
@@ -271,7 +275,11 @@ def _print_article_unprotected(article: dict[str, Any]) -> tuple[str, bool]:
         (str(article["link"]) + str(time.time_ns())).encode()
     ).hexdigest()[:8]
     print(f"\n--- BEGIN UNTRUSTED ARTICLE CONTENT {nonce} ---")
-    record_verified_read(str(article["link"]), text)
+    # One transaction stores the fetched body cache (paid-API economy) and the
+    # verified-read proof together.
+    record_verified_read(
+        str(article["link"]), text, content_to_cache=None if was_cached else text
+    )
     print(text)
     print(f"--- END UNTRUSTED ARTICLE CONTENT {nonce} ---")
     print(f"Content source: {article.get('content_source') or 'direct'}")
@@ -346,14 +354,32 @@ def _score_metadata(arguments: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _sync_entry(entry: dict[str, Any], *, dry_run: bool = False) -> None:
+def _sync_entry(
+    entry: dict[str, Any],
+    *,
+    dry_run: bool = False,
+    preflight_result: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Sync one entry; returns the reusable preflight for batch callers.
+
+    ``preflight_result`` lets a sync loop run the lark-cli identity/field
+    probes once instead of per record; per-record config loading stays here so
+    the entry loop keeps a single testable seam.
+    """
     config = load_config()
     feishu = config["feishu"]
     if not feishu["enabled"]:
         raise ConfigError("Feishu sync is disabled; complete Agent setup first")
-    result = production_feishu_target(feishu).sync(
-        entry["article"], entry["metadata"], dry_run=dry_run
-    ) or {}
+    result = (
+        production_feishu_target(feishu)
+        .sync(
+            entry["article"],
+            entry["metadata"],
+            dry_run=dry_run,
+            preflight_result=preflight_result,
+        )
+        or {}
+    )
     if result.get("skipped_fields"):
         print(
             "⚠ 部分字段因选项不匹配被跳过（在飞书补选项后重同步即可）："
@@ -361,6 +387,8 @@ def _sync_entry(entry: dict[str, Any], *, dry_run: bool = False) -> None:
         )
     if not dry_run:
         update_sync_status(entry["article"]["link"], "synced")
+    preflight = result.get("preflight")
+    return preflight if isinstance(preflight, dict) else None
 
 
 def _raise_sync_failures(failures: list[Exception], *, prefix: str) -> None:
@@ -496,9 +524,13 @@ def cmd_sync_all(*, dry_run: bool = False, link: str | None = None) -> int:
         print("No articles are waiting for Feishu sync")
         return 0
     failures: list[Exception] = []
+    # One preflight per batch: identity and field mapping do not change between
+    # records, and each check spawns several slow lark-cli subprocess probes.
+    preflight_result: dict[str, Any] | None = None
     for entry in entries:
         try:
-            _sync_entry(entry, dry_run=dry_run)
+            reused = _sync_entry(entry, dry_run=dry_run, preflight_result=preflight_result)
+            preflight_result = reused or preflight_result
             print(f"Synced: {entry['article'].get('title', '')}")
         except (ConfigError, KeyError, LarkCLIError, ValueError) as exc:
             failures.append(exc)
@@ -571,7 +603,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--format", choices=("text", "json"), default="text")
     commands = parser.add_subparsers(dest="command", required=True)
-    list_parser = commands.add_parser("list")
+    list_parser = commands.add_parser(
+        "list", help="deprecated: use `inbox` for the filtered, sortable view"
+    )
     list_parser.add_argument("--account")
     inbox_parser = commands.add_parser("inbox")
     inbox_parser.add_argument("--status", choices=("pending", "processed", "all"), default="pending")
@@ -737,17 +771,13 @@ def main(argv: list[str] | None = None) -> int:
                 }
             print(dump(envelope))
         return result
-    except (ConfigError, LarkCLIError, LookupError, ValueError) as exc:
-        if json_output:
-            print(dump(failure(exc)))
-        else:
-            logger.error("%s", exc)
-        return 1
     except Exception as exc:
         # Unexpected failures (corrupt queue, lock timeout, OS errors) must
         # still produce a protocol envelope instead of a raw traceback.
         if json_output:
             print(dump(failure(exc)))
+        elif isinstance(exc, (ConfigError, LarkCLIError, LookupError, ValueError)):
+            logger.error("%s", exc)
         else:
             logger.exception("unexpected failure in %s", arguments.command)
         return 1

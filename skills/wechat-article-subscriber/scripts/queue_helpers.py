@@ -23,7 +23,7 @@ MAX_PROCESSED_AGE_DAYS = 365
 
 
 def empty_queue() -> dict[str, Any]:
-    return {"version": QUEUE_VERSION, "pending": [], "processed": {}}
+    return {"version": QUEUE_VERSION, "pending": [], "processed": {}, "legacy_retired": False}
 
 
 def normalize_url(url: str) -> str:
@@ -54,11 +54,68 @@ def queue_lock(timeout: float = 10.0) -> Iterator[None]:
         yield
 
 
+def _find_pending(data: dict[str, Any], normalized: str) -> dict[str, Any] | None:
+    return next(
+        (item for item in data["pending"] if item.get("normalized_url") == normalized),
+        None,
+    )
+
+
+def _remove_pending(data: dict[str, Any], normalized: str) -> None:
+    data["pending"] = [
+        item for item in data["pending"] if item.get("normalized_url") != normalized
+    ]
+
+
+def _processed_entry(
+    article: dict[str, Any],
+    *,
+    now: str,
+    sync_status: str,
+    metadata: dict[str, Any],
+    keep_content: bool = True,
+) -> dict[str, Any]:
+    """Build one processed entry from a pending article.
+
+    Completed entries drop the cached body: no later command reads it again,
+    and bodies (up to 100 KiB each) dominate the queue size on disk. Dismissed
+    entries keep it so restoring one never re-pays the detail call.
+    """
+    article_copy = deepcopy(article)
+    if not keep_content:
+        article_copy.pop("content", None)
+    return {
+        "article": article_copy,
+        "content_hash": article.get("content_hash"),
+        "processed_at": now,
+        "sync_status": sync_status,
+        "metadata": metadata,
+    }
+
+
+def _strip_terminal_content(entry: dict[str, Any]) -> dict[str, Any]:
+    """Drop the cached body from one non-dismissed processed entry in place.
+
+    Migration for queues written before completion stopped preserving bodies;
+    runs inside cleanup_processed, which already rewrites the whole file.
+    """
+    article = entry.get("article")
+    if not isinstance(article, dict) or not article.get("content"):
+        return entry
+    if (entry.get("metadata") or {}).get("disposition") == "dismissed":
+        return entry
+    del article["content"]
+    return entry
+
+
 def _validate_queue(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("queue root must be an object")
     pending = data.get("pending")
     processed = data.get("processed")
+    legacy_retired = data.get("legacy_retired", False)
+    if not isinstance(legacy_retired, bool):
+        raise ValueError("queue.legacy_retired must be boolean")
     if not isinstance(pending, list) or not isinstance(processed, dict):
         raise ValueError("queue must contain pending list and processed object")
     for index, article in enumerate(pending):
@@ -83,7 +140,12 @@ def _validate_queue(data: Any) -> dict[str, Any]:
             raise ValueError(f"processed[{normalized!r}].processed_at must be a string")
         if not isinstance(entry.get("sync_status"), str):
             raise ValueError(f"processed[{normalized!r}].sync_status must be a string")
-    return {"version": QUEUE_VERSION, "pending": pending, "processed": processed}
+    return {
+        "version": QUEUE_VERSION,
+        "pending": pending,
+        "processed": processed,
+        "legacy_retired": legacy_retired,
+    }
 
 
 def _validate_article(article: Any, location: str) -> None:
@@ -190,19 +252,36 @@ def add_pending(articles: list[dict[str, Any]], *, content_dedup: bool = False) 
         return added
 
 
-def cache_article_content(link: str, content: str) -> None:
-    """Persist a lazily fetched body on a pending article (paid-API economy)."""
+def record_verified_read(
+    link: str,
+    text: str,
+    *,
+    content_to_cache: str | None = None,
+) -> dict[str, Any]:
+    """Atomically persist a bounded read proof, and optionally the body.
+
+    One transaction stores both the paid-detail body cache and the verified
+    read state; separate transactions would double the full-queue IO on every
+    read and could cache a body whose proof write then failed.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("article text must be non-empty before recording a verified read")
     normalized = normalize_url(link)
+    state = {
+        "status": "verified",
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
     with queue_lock():
         data = _read_unlocked()
-        article = next(
-            (item for item in data["pending"] if item.get("normalized_url") == normalized),
-            None,
-        )
+        article = _find_pending(data, normalized)
         if article is None:
-            return
-        article["content"] = content
+            raise LookupError("article is no longer pending")
+        if content_to_cache is not None:
+            article["content"] = content_to_cache
+        article["read_state"] = state
         _write_unlocked(data)
+        return deepcopy(article)
 
 
 def retire_legacy_pending() -> int:
@@ -212,10 +291,15 @@ def retire_legacy_pending() -> int:
     redfox work_uuid, so no future command can read or score them. Re-running
     discovery cannot repair them either (URL dedup keeps the old entry), so
     they are moved to processed with an explicit legacy disposition instead
-    of blocking the pending list forever.
+    of blocking the pending list forever. Once the queue carries the
+    ``legacy_retired`` flag the scan is skipped entirely.
     """
+    if not queue_path().exists():
+        return 0
     with queue_lock():
         data = _read_unlocked()
+        if data.get("legacy_retired"):
+            return 0
         now = datetime.now(timezone.utc).isoformat()
         kept: list[dict[str, Any]] = []
         retired = 0
@@ -226,19 +310,19 @@ def retire_legacy_pending() -> int:
                 and not article.get("content_source")
             ):
                 article["inbox_updated_at"] = now
-                data["processed"][article["normalized_url"]] = {
-                    "article": deepcopy(article),
-                    "content_hash": article.get("content_hash"),
-                    "processed_at": now,
-                    "sync_status": "not_requested",
-                    "metadata": {"disposition": "legacy_unreadable"},
-                }
+                data["processed"][article["normalized_url"]] = _processed_entry(
+                    article,
+                    now=now,
+                    sync_status="not_requested",
+                    metadata={"disposition": "legacy_unreadable"},
+                )
                 retired += 1
             else:
                 kept.append(article)
+        data["legacy_retired"] = True
         if retired:
             data["pending"] = kept
-            _write_unlocked(data)
+        _write_unlocked(data)
         return retired
 
 
@@ -267,29 +351,6 @@ def has_verified_read(article: dict[str, Any]) -> bool:
     )
 
 
-def record_verified_read(link: str, text: str) -> dict[str, Any]:
-    """Atomically persist bounded proof that a pending article was read."""
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("article text must be non-empty before recording a verified read")
-    normalized = normalize_url(link)
-    state = {
-        "status": "verified",
-        "verified_at": datetime.now(timezone.utc).isoformat(),
-        "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-    }
-    with queue_lock():
-        data = _read_unlocked()
-        article = next(
-            (item for item in data["pending"] if item.get("normalized_url") == normalized),
-            None,
-        )
-        if article is None:
-            raise LookupError("article is no longer pending")
-        article["read_state"] = state
-        _write_unlocked(data)
-        return deepcopy(article)
-
-
 def update_inbox_item(
     link: str,
     *,
@@ -304,10 +365,7 @@ def update_inbox_item(
     normalized = normalize_url(link)
     with queue_lock():
         data = _read_unlocked()
-        article = next(
-            (item for item in data["pending"] if item.get("normalized_url") == normalized),
-            None,
-        )
+        article = _find_pending(data, normalized)
         location = "pending"
         if article is None:
             entry = data["processed"].get(normalized)
@@ -336,10 +394,7 @@ def dismiss_article(link: str) -> dict[str, Any]:
     normalized = normalize_url(link)
     with queue_lock():
         data = _read_unlocked()
-        article = next(
-            (item for item in data["pending"] if item.get("normalized_url") == normalized),
-            None,
-        )
+        article = _find_pending(data, normalized)
         if article is None:
             existing = data["processed"].get(normalized)
             if (
@@ -348,18 +403,15 @@ def dismiss_article(link: str) -> dict[str, Any]:
             ):
                 return deepcopy(existing)
             raise LookupError("only pending articles can be dismissed")
-        data["pending"] = [
-            item for item in data["pending"] if item.get("normalized_url") != normalized
-        ]
+        _remove_pending(data, normalized)
         now = datetime.now(timezone.utc).isoformat()
         article["inbox_updated_at"] = now
-        entry = {
-            "article": deepcopy(article),
-            "content_hash": article.get("content_hash"),
-            "processed_at": now,
-            "sync_status": "not_requested",
-            "metadata": {"disposition": "dismissed"},
-        }
+        entry = _processed_entry(
+            article,
+            now=now,
+            sync_status="not_requested",
+            metadata={"disposition": "dismissed"},
+        )
         data["processed"][normalized] = entry
         _write_unlocked(data)
         return deepcopy(entry)
@@ -394,10 +446,7 @@ def complete_article(
     normalized = normalize_url(link)
     with queue_lock():
         data = _read_unlocked()
-        article = next(
-            (item for item in data["pending"] if item.get("normalized_url") == normalized),
-            None,
-        )
+        article = _find_pending(data, normalized)
         if article is None:
             existing = data["processed"].get(normalized)
             if existing:
@@ -407,16 +456,14 @@ def complete_article(
                     )
                 return deepcopy(existing)
             raise LookupError("article is no longer pending")
-        data["pending"] = [
-            item for item in data["pending"] if item.get("normalized_url") != normalized
-        ]
-        entry = {
-            "article": deepcopy(article),
-            "content_hash": article.get("content_hash"),
-            "processed_at": datetime.now(timezone.utc).isoformat(),
-            "sync_status": sync_status,
-            "metadata": deepcopy(metadata or {}),
-        }
+        _remove_pending(data, normalized)
+        entry = _processed_entry(
+            article,
+            now=datetime.now(timezone.utc).isoformat(),
+            sync_status=sync_status,
+            metadata=deepcopy(metadata or {}),
+            keep_content=False,
+        )
         data["processed"][normalized] = entry
         _write_unlocked(data)
         return deepcopy(entry)
@@ -474,7 +521,7 @@ def cleanup_processed(max_age_days: int = MAX_PROCESSED_AGE_DAYS) -> int:
                 continue
             if timestamp >= cutoff:
                 retained[link] = entry
-        data["processed"] = retained
+        data["processed"] = {link: _strip_terminal_content(entry) for link, entry in retained.items()}
         _write_unlocked(data)
         return before - len(retained)
 

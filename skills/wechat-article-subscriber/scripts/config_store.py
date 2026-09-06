@@ -289,19 +289,7 @@ def _validate_feishu(feishu: Any) -> None:
     # boundary and requires resolvable title/url fields before any write.
 
 
-def validate_config(config: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(config, dict):
-        raise ConfigError("config must be a JSON object")
-    config = _merge_defaults(config)
-    version = config.get("version")
-    if not isinstance(version, int) or isinstance(version, bool):
-        raise ConfigError("config.version must be an integer")
-    if version > CONFIG_VERSION:
-        raise ConfigError(
-            f"configuration version {version} is newer than supported version {CONFIG_VERSION}"
-        )
-    config["version"] = CONFIG_VERSION
-    setup = config["setup"]
+def _validate_setup(setup: dict[str, Any]) -> None:
     if not isinstance(setup.get("search_window_confirmed"), bool):
         raise ConfigError("setup.search_window_confirmed must be boolean")
     if not isinstance(setup.get("feishu_identity_confirmed"), bool):
@@ -369,7 +357,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError(
             "Feishu provisioning names require allow_feishu_provisioning=true"
         )
-    subscriptions = config["subscriptions"]
+
+
+def _validate_subscriptions(subscriptions: Any) -> None:
     if not isinstance(subscriptions, list):
         raise ConfigError("subscriptions must be a list")
     for index, subscription in enumerate(subscriptions):
@@ -377,7 +367,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(f"subscriptions[{index}] must be an object")
         if not any(str(subscription.get(key, "")).strip() for key in ("name", "alias", "biz")):
             raise ConfigError(f"subscriptions[{index}] needs name, alias, or biz")
-    settings = config["settings"]
+
+
+def _validate_settings(settings: dict[str, Any]) -> None:
     numeric_rules = {
         "check_hours": (1, 24 * 365),
         "request_delay": (0, 60),
@@ -394,10 +386,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("settings.content_dedup must be boolean")
     if settings.get("output_language") not in {"auto", "zh", "en"}:
         raise ConfigError("settings.output_language must be auto, zh, or en")
-    redfox = config["redfox"]
-    if not isinstance(redfox.get("api_key"), str):
-        raise ConfigError("redfox.api_key must be a string")
-    preferences = config["preferences"]
+
+
+def _validate_preferences(preferences: Any) -> None:
     if not isinstance(preferences, dict):
         raise ConfigError("preferences must be an object")
     for key in ("include_topics", "exclude_keywords", "preferred_accounts"):
@@ -413,7 +404,28 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     digest_limit = preferences.get("digest_limit")
     if not isinstance(digest_limit, int) or isinstance(digest_limit, bool) or not 1 <= digest_limit <= 50:
         raise ConfigError("preferences.digest_limit must be an integer between 1 and 50")
+
+
+def validate_config(config: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        raise ConfigError("config must be a JSON object")
+    config = _merge_defaults(config)
+    version = config.get("version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise ConfigError("config.version must be an integer")
+    if version > CONFIG_VERSION:
+        raise ConfigError(
+            f"configuration version {version} is newer than supported version {CONFIG_VERSION}"
+        )
+    config["version"] = CONFIG_VERSION
+    _validate_setup(config["setup"])
+    _validate_subscriptions(config["subscriptions"])
+    _validate_settings(config["settings"])
+    if not isinstance(config["redfox"].get("api_key"), str):
+        raise ConfigError("redfox.api_key must be a string")
+    _validate_preferences(config["preferences"])
     _validate_feishu(config["feishu"])
+    execution_policy = config["setup"]["execution_policy"]
     destination = config["feishu"]["destination"]
     if execution_policy["confirmed"] and destination == "undecided":
         raise ConfigError(
@@ -445,9 +457,8 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     return validate_config(raw)
 
 
-def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
-    target = Path(path) if path else config_path()
-    validated = validate_config(config)
+def _persist_config(target: Path, validated: dict[str, Any]) -> None:
+    """Write one already-validated configuration, with version backup."""
     if target.exists():
         try:
             existing = json.loads(target.read_text(encoding="utf-8-sig"))
@@ -459,6 +470,11 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
         except (OSError, UnicodeError, json.JSONDecodeError):
             pass
     secure_write_json(target, validated)
+
+
+def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
+    target = Path(path) if path else config_path()
+    _persist_config(target, validate_config(config))
     return target
 
 
@@ -477,15 +493,17 @@ def modify_config(
 
     The mutator receives the latest validated configuration, mutates it in
     place, and returns it (returning ``None`` is accepted for in-place
-    mutation). The result is validated and saved before the lock is released.
+    mutation). The result is validated once after mutation and saved before
+    the lock is released; the saved value is returned without re-validating.
     If the mutator raises or validation fails, nothing is written.
     """
     with config_lock():
         config = load_config(path)
         result = mutator(config)
         result = result if result is not None else config
-        save_config(result, path)
-        return validate_config(result)
+        validated = validate_config(result)
+        _persist_config(Path(path) if path else config_path(), validated)
+        return validated
 
 
 def update_health(

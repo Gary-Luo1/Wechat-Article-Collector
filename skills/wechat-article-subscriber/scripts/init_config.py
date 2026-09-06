@@ -27,7 +27,7 @@ from config_store import (
 )
 from execution_policy import invalidate_for_feishu_change
 from paths import config_path, data_dir, secure_write_json
-from protocol import dump, failure, success
+from protocol import dump, emit, failure, success
 
 
 MAX_AGENT_INPUT_BYTES = 256 * 1024
@@ -260,10 +260,10 @@ def _open_local_file(*, json_output: bool) -> int:
         "contents_echoed": False,
         "encrypted": False,
     }
-    print(
-        dump(success(result, next_action="edit_then_validate_local_config"))
-        if json_output
-        else f"Opened local configuration: {target}"
+    emit(
+        success(result, next_action="edit_then_validate_local_config"),
+        json_output=json_output,
+        text=f"Opened local configuration: {target}",
     )
     return 0
 
@@ -308,7 +308,11 @@ def setup_guide() -> dict[str, Any]:
                     "redfox.hk API key; preferred input channel is "
                     "`printf %s '<KEY>' | manage redfox-set-key`"
                 ),
-                "subscriptions": "account entries; each needs the WeChat alias (微信号) — the data source queries by alias only",
+                "subscriptions": (
+                    "account entries; each needs the WeChat alias (微信号) — the data source "
+                    "queries by alias only; the bundled assets/default_subscriptions.json "
+                    "roster (name + alias, no paid resolution) can seed this list"
+                ),
                 "settings.check_hours": "lookback window in hours; 24 is recommended",
                 "feishu.destination": (
                     "required explicit choice: skip, map an existing Base, or create a Base; "
@@ -349,7 +353,7 @@ def setup_guide() -> dict[str, Any]:
             "collect_before_execution": [
                 "credential input channel",
                 "redfox API key via stdin",
-                "subscription account names",
+                "subscriptions (preview/apply the bundled default roster first, then user adjustments)",
                 "search window",
                 "whether routine Feishu provisioning and qualified-record sync are allowed",
                 "whether Feishu is skipped, mapped to an existing table, or provisioned",
@@ -554,63 +558,70 @@ def config_from_agent_payload(
     return validate_config(config)
 
 
+def _merge_section(
+    value: Any,
+    *,
+    label: str,
+    keys: set[str],
+    defaults: dict[str, Any],
+    partial: bool,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate one configuration section patch and merge it over its base.
+
+    Partial patches keep every omitted key from the existing section (or from
+    the defaults when none exists yet); a full replacement starts empty.
+    """
+    if not isinstance(value, dict):
+        raise ConfigError(f"{label} must be an object")
+    unexpected = set(value) - keys
+    if unexpected:
+        raise ConfigError(f"{label} contains unsupported keys: {sorted(unexpected)}")
+    if partial and existing is not None:
+        normalized = deepcopy(existing)
+    else:
+        normalized = deepcopy(defaults) if partial else {}
+    normalized.update(value)
+    return normalized
+
+
 def _normalize_settings(
     value: Any, *, partial: bool, existing: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ConfigError("settings must be an object")
-    unexpected = set(value) - SETTINGS_INPUT_KEYS
-    if unexpected:
-        raise ConfigError(f"settings contains unsupported keys: {sorted(unexpected)}")
-    normalized = (
-        deepcopy(existing)
-        if partial and existing is not None
-        else deepcopy(DEFAULT_CONFIG["settings"])
+    return _merge_section(
+        value,
+        label="settings",
+        keys=SETTINGS_INPUT_KEYS,
+        defaults=DEFAULT_CONFIG["settings"],
+        partial=partial,
+        existing=existing,
     )
-    if partial:
-        normalized.update(value)
-    else:
-        normalized = dict(value)
-    return normalized
 
 
 def _normalize_preferences(
     value: Any, *, partial: bool, existing: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ConfigError("preferences must be an object")
-    unexpected = set(value) - PREFERENCES_INPUT_KEYS
-    if unexpected:
-        raise ConfigError(f"preferences contains unsupported keys: {sorted(unexpected)}")
-    normalized = (
-        deepcopy(existing)
-        if partial and existing is not None
-        else (deepcopy(DEFAULT_CONFIG["preferences"]) if partial else {})
+    return _merge_section(
+        value,
+        label="preferences",
+        keys=PREFERENCES_INPUT_KEYS,
+        defaults=DEFAULT_CONFIG["preferences"],
+        partial=partial,
+        existing=existing,
     )
-    normalized.update(value)
-    return normalized
 
 
 def _normalize_execution_policy(
     value: Any, *, partial: bool, existing: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ConfigError("execution_policy must be an object")
-    unexpected = set(value) - EXECUTION_POLICY_INPUT_KEYS
-    if unexpected:
-        raise ConfigError(
-            f"execution_policy contains unsupported keys: {sorted(unexpected)}"
-        )
-    if partial and existing is not None:
-        # Partial patches keep every omitted policy field unchanged; rebuilding
-        # from defaults would reset confirmed/sync flags on every patch.
-        normalized = deepcopy(existing)
-    else:
-        normalized = (
-            deepcopy(DEFAULT_CONFIG["setup"]["execution_policy"]) if partial else {}
-        )
-    normalized.update(value)
-    return normalized
+    return _merge_section(
+        value,
+        label="execution_policy",
+        keys=EXECUTION_POLICY_INPUT_KEYS,
+        defaults=DEFAULT_CONFIG["setup"]["execution_policy"],
+        partial=partial,
+        existing=existing,
+    )
 
 
 def _apply_section_patch(
@@ -627,14 +638,10 @@ def _apply_section_patch(
         config["subscriptions"] = _normalize_subscriptions(value)
         _reset_health(config, "subscriptions")
     elif section == "settings":
-        if not isinstance(payload, dict):
-            raise ConfigError("settings must be an object")
-        unexpected = set(payload) - SETTINGS_INPUT_KEYS
-        if unexpected:
-            raise ConfigError(f"settings contains unsupported keys: {sorted(unexpected)}")
-        updates = dict(payload)
-        config["settings"].update(updates)
-        if "check_hours" in updates:
+        config["settings"] = _normalize_settings(
+            payload, partial=True, existing=config["settings"]
+        )
+        if "check_hours" in payload:
             config["setup"]["search_window_confirmed"] = True
     elif section == "preferences":
         config["preferences"] = _normalize_preferences(payload, partial=True)
@@ -674,12 +681,11 @@ def _save_agent_raw(raw: str, *, section: str = "full", json_output: bool = Fals
                 # First-time setup: no existing config to merge, build from defaults.
                 config = config_from_agent_payload(payload)
                 save_config(config)
-            path = config_path()
         else:
             config = modify_config(
                 lambda current: _apply_section_patch(current, section, payload)
             )
-            path = config_path()
+        path = config_path()
     except (ConfigError, OSError, json.JSONDecodeError, UnicodeError) as exc:
         if json_output:
             print(dump(failure(exc)))
@@ -750,7 +756,7 @@ def _prepare_agent_file(*, json_output: bool = False) -> int:
         print(dump(failure(exc, message="cannot prepare Agent configuration inbox"))) if json_output else logging.error("Cannot prepare Agent configuration inbox: %s", exc)
         return 1
     path = str(Path(name).resolve())
-    print(dump(success({"inbox_path": path})) if json_output else path)
+    emit(success({"inbox_path": path}), json_output=json_output, text=path)
     return 0
 
 
