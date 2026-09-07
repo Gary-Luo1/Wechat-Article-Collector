@@ -46,8 +46,12 @@ remains the default for POSIX shells and Agents that can pipe raw bytes.
 
 ## Front-loaded configuration
 
-Collect configuration in one opening dialogue before routine work starts. Run
-`setup --guide --format json` and use its `configuration_manifest`. Determine:
+Collect configuration across one opening dialogue before routine work starts, but
+ask exactly one question per turn: present the wizard's current question alone,
+wait for the answer, apply it, and only then move to the next question — never
+batch several questions into one message or a multi-question form. Run
+`setup --guide --format json` and use its `configuration_manifest` as the
+coverage checklist. Determine:
 
 - credential input channel, subscriptions, and search window;
 - whether Feishu is skipped, mapped, or provisioned (a required explicit choice,

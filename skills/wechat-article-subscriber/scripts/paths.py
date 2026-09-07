@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -54,6 +56,22 @@ def lock_path() -> Path:
 
 def venv_dir() -> Path:
     return data_dir() / "venv"
+
+
+def open_with_default_app(target: Path) -> None:
+    """Open one local file with the platform default editor/viewer."""
+    if os.name == "nt":
+        os.startfile(str(target))  # type: ignore[attr-defined]
+        return
+    command = (
+        ["open", str(target)] if sys.platform == "darwin" else ["xdg-open", str(target)]
+    )
+    subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
 
 
 def secure_write_json(path: Path, value: Any) -> None:

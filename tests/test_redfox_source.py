@@ -304,7 +304,8 @@ def test_secret_hint_appended_to_misleading_cli_error():
     )
     assert "config init --new" in enriched
     assert "open.feishu.cn" in enriched
-    assert "--app-secret-stdin" in enriched
+    assert "--prepare-secret-file" in enriched
+    assert "--secret-file" in enriched
 
 
 def test_no_data_result_reports_unresolved_and_skips_cooldown(isolated_home, monkeypatch):
@@ -615,14 +616,22 @@ def test_feishu_app_secret_requires_bound_matching_app(isolated_home, monkeypatc
     save_config(cfg)
 
     with pytest.raises(ValueError, match="does not match"):
-        manage.feishu_app_secret(types_simple_namespace(app_id="cli_other"))
+        manage.feishu_app_secret(
+            types_simple_namespace(
+                app_id="cli_other", prepare_secret_file=False, open_secret_file=False, secret_file=""
+            )
+        )
     # Empty stdin -> the secret is refused before anything is sent to lark-cli.
     import io
 
     monkeypatched_stdin = io.StringIO("")
     monkeypatch.setattr("sys.stdin", monkeypatched_stdin)
     with pytest.raises(ValueError, match="App Secret is empty"):
-        manage.feishu_app_secret(types_simple_namespace(app_id=""))
+        manage.feishu_app_secret(
+            types_simple_namespace(
+                app_id="", prepare_secret_file=False, open_secret_file=False, secret_file=""
+            )
+        )
 
 
 def test_redfox_set_key_seeds_missing_config(isolated_home, monkeypatch):

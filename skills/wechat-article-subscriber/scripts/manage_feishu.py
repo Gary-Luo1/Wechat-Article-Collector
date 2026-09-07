@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -45,10 +46,15 @@ from lark_runtime import (
     private_profile_secret_state,
     profile_name_for_app,
 )
+from paths import data_dir, open_with_default_app
 from protocol import (
     _pipe_cmd,
     _read_secret_stdin,
 )
+
+SECRET_FILE_NAME = "feishu-app-secret.txt"
+SECRET_FILE_PLACEHOLDER = "PASTE_APP_SECRET_HERE"
+SECRET_FILE_MAX_BYTES = 64 * 1024
 
 def _authorization(config: dict[str, Any]) -> dict[str, Any]:
     return config["setup"]["feishu_authorization"]
@@ -442,10 +448,7 @@ def feishu_app(app_id: str) -> dict[str, Any]:
         "app_id_included": False,
         "private_profile": profile,
         "global_profiles_modified": False,
-        "next_command": (
-            "lark config init --app-id <CONFIRMED_APP_ID> "
-            "--app-secret-stdin"
-        ),
+        "next_command": _secret_file_command(),
         "profile_name_added_automatically": True,
     }
 
@@ -561,12 +564,11 @@ def feishu_setup() -> tuple[dict[str, Any], str]:
         # (local check only; no network, no device-auth request).
         state.update(
             next_question=(
-                "bot 身份需要应用的 App Secret 才能调用飞书 API：请从开放平台应用的"
-                "『凭证与基础信息』复制，用 stdin 管道提供（不经过聊天回显）。"
+                "bot 身份需要应用的 App Secret 才能调用飞书 API：Agent 会创建并打开"
+                "一个本地密钥文件，把开放平台应用『凭证与基础信息』里的 App Secret "
+                "粘贴进去保存即可（不经过聊天，也不需要运行命令）。"
             ),
-            next_command=_pipe_cmd(
-                f"printf %s '<APP_SECRET>' | manage feishu-app-secret --app-id {app_id}"
-            ),
+            next_command=_secret_file_command(),
             create_app_guide=guide,
         )
         return state, "provide_app_secret_for_private_profile"
@@ -600,10 +602,12 @@ def feishu_setup() -> tuple[dict[str, Any], str]:
         return state, "resume_existing_user_base_authorization"
     if facts["feishu_identity"] == "user" and facts["authorization_state"] != "authorized":
         state.update(
-            next_question="应用已绑定但密钥/授权未就绪：请提供 App Secret（stdin），随后完成一次扫码授权。",
-            next_command=_pipe_cmd(
-                f"printf %s '<APP_SECRET>' | manage feishu-app-secret --app-id {app_id}"
+            next_question=(
+                "应用已绑定但密钥/授权未就绪：Agent 会创建并打开一个本地密钥文件，"
+                "把『凭证与基础信息』里的 App Secret 粘贴进去保存（不经过聊天）；"
+                "随后完成一次扫码授权。"
             ),
+            next_command=_secret_file_command(),
             then="manage feishu-auth start（扫码后 feishu-auth complete）",
             create_app_guide=guide,
         )
@@ -655,21 +659,113 @@ def feishu_setup() -> tuple[dict[str, Any], str]:
     return state, "run_feishu_validation"
 
 
-def feishu_app_secret(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
-    """Pipe one App Secret from stdin into the isolated lark-cli profile."""
-    config = load_config()
-    app_id = _expected_app_id(config)
-    if not app_id:
-        raise ConfigError("bind the App ID first with manage feishu-app")
-    if arguments.app_id and arguments.app_id.strip() != app_id:
-        raise ValueError(
-            f"--app-id {arguments.app_id} does not match the confirmed App ID {app_id}"
+def _secret_file_path() -> Path:
+    return data_dir() / SECRET_FILE_NAME
+
+
+def _secret_file_command() -> str:
+    return (
+        "manage feishu-app-secret --prepare-secret-file → manage feishu-app-secret "
+        "--open-secret-file（用户在打开的文件里粘贴并保存后）→ "
+        "manage feishu-app-secret --secret-file <PATH>"
+    )
+
+
+def _secret_file_instructions(path: Path) -> list[str]:
+    return [
+        "打开文件后，把应用『凭证与基础信息』里的 App Secret 粘贴为一行，替换占位符整行。",
+        "保存并关闭文件（多余的空行或文字会导致校验失败）。",
+        "回到对话告诉 Agent 已完成，由它执行 consume 命令；文件读取后会被删除。",
+    ]
+
+
+def _prepare_secret_file() -> tuple[dict[str, Any], str]:
+    """Create the restricted one-line secret file for the user to paste into."""
+    path = _secret_file_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            SECRET_FILE_PLACEHOLDER + "\n",
+            encoding="utf-8",
         )
-    if not config["setup"]["feishu_identity_confirmed"]:
-        raise ConfigError("confirm Feishu identity before entering an App Secret")
-    secret = _read_secret_stdin("the Feishu App Secret")
+        if os.name != "nt":
+            path.chmod(0o600)
+    except OSError as exc:
+        raise LarkCLIError(f"cannot prepare the App Secret file: {exc}") from exc
+    return {
+        "path": str(path),
+        "created": True,
+        "encrypted": False,
+        "protection": "plaintext local file protected by the current OS user account permissions; consumed and deleted after one read",
+        "contents_echoed": False,
+        "instructions": _secret_file_instructions(path),
+        "consume_command": f"manage feishu-app-secret --secret-file {path}",
+    }, "edit_then_consume_feishu_secret_file"
+
+
+def _open_secret_file() -> tuple[dict[str, Any], str]:
+    """Open the prepared secret file in the user's default editor."""
+    path = _secret_file_path()
+    if not path.is_file():
+        raise ConfigError(
+            f"the App Secret file does not exist at {path}; prepare it first"
+        )
+    try:
+        open_with_default_app(path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LarkCLIError(f"cannot open the App Secret file editor: {exc}") from exc
+    return {
+        "path": str(path),
+        "opened": True,
+        "contents_echoed": False,
+        "instructions": _secret_file_instructions(path),
+        "consume_command": f"manage feishu-app-secret --secret-file {path}",
+    }, "edit_then_consume_feishu_secret_file"
+
+
+def _read_secret_file(value: Path) -> str:
+    """Consume the prepared secret file: scoped, single-line, deleted on success."""
+    candidate = Path(value).expanduser()
+    if candidate.is_symlink():
+        raise ConfigError("the App Secret file cannot be a symbolic link")
+    resolved = candidate.resolve()
+    if resolved.parent != data_dir().resolve() or resolved.name != SECRET_FILE_NAME:
+        raise ConfigError(
+            "the App Secret file must be the prepared file inside the application "
+            f"state directory ({data_dir() / SECRET_FILE_NAME})"
+        )
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(resolved, flags)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            raw = handle.read(SECRET_FILE_MAX_BYTES + 1)
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"cannot read the App Secret file: {exc}") from exc
+    if len(raw.encode("utf-8")) > SECRET_FILE_MAX_BYTES:
+        # Leave oversized files in place for the user to inspect manually.
+        raise ConfigError("the App Secret file exceeds 64 KiB")
+    secret = raw.strip()
     if not secret:
-        raise ValueError("the App Secret is empty")
+        raise ConfigError("the App Secret file is empty; paste the secret first")
+    if secret == SECRET_FILE_PLACEHOLDER:
+        raise ConfigError(
+            "the App Secret file still contains the placeholder; paste the real "
+            "secret and save before consuming"
+        )
+    if "\n" in secret or "\r" in secret:
+        raise ConfigError(
+            "the App Secret file must contain only the secret on a single line"
+        )
+    try:
+        resolved.unlink()
+    except OSError as exc:
+        raise ConfigError(f"cannot remove the consumed App Secret file: {exc}") from exc
+    return secret
+
+
+def _store_app_secret(app_id: str, secret: str) -> dict[str, Any]:
     try:
         _run_lark(
             ["config", "init", "--app-id", app_id, "--app-secret-stdin"],
@@ -688,7 +784,32 @@ def feishu_app_secret(arguments: argparse.Namespace) -> tuple[dict[str, Any], st
             code=exc.code,
             retryable=exc.retryable,
         ) from exc
-    probe = probe_app_secret_resolution()
+    return probe_app_secret_resolution()
+
+
+def feishu_app_secret(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
+    """Collect one App Secret: prepared local file (default) or stdin pipe."""
+    config = load_config()
+    app_id = _expected_app_id(config)
+    if not app_id:
+        raise ConfigError("bind the App ID first with manage feishu-app")
+    if arguments.app_id and arguments.app_id.strip() != app_id:
+        raise ValueError(
+            f"--app-id {arguments.app_id} does not match the confirmed App ID {app_id}"
+        )
+    if not config["setup"]["feishu_identity_confirmed"]:
+        raise ConfigError("confirm Feishu identity before entering an App Secret")
+    if arguments.prepare_secret_file:
+        return _prepare_secret_file()
+    if arguments.open_secret_file:
+        return _open_secret_file()
+    if arguments.secret_file:
+        secret = _read_secret_file(Path(arguments.secret_file))
+    else:
+        secret = _read_secret_stdin("the Feishu App Secret")
+    if not secret:
+        raise ValueError("the App Secret is empty")
+    probe = _store_app_secret(app_id, secret)
     return {
         "app_id": app_id,
         "secret_accepted": probe["resolvable"],

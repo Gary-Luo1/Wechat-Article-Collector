@@ -156,10 +156,11 @@ def probe_app_secret_resolution() -> dict[str, Any]:
                 "reason": "keychain_secret_not_migratable",
                 "remediation": (
                     "copy the App Secret from the Feishu Open Platform console "
-                    "(open.feishu.cn) for the bound App ID, then pipe it into "
-                    "manage feishu-app-secret (bash: printf %s '<APP_SECRET>' | "
-                    "manage feishu-app-secret; PowerShell: '<APP_SECRET>' | manage "
-                    "feishu-app-secret)"
+                    "(open.feishu.cn) for the bound App ID, then have the Agent "
+                    "run manage feishu-app-secret --prepare-secret-file / "
+                    "--open-secret-file and paste the secret into the opened "
+                    "local file; the Agent consumes it with "
+                    "manage feishu-app-secret --secret-file <PATH>"
                 ),
             }
         return {"resolvable": False, "reason": "api_error", "message": message[:200]}

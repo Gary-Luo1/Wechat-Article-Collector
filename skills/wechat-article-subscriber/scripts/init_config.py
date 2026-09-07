@@ -350,6 +350,11 @@ def setup_guide() -> dict[str, Any]:
             "rule": "state the 24-hour default explicitly; never apply it silently",
         },
         "configuration_manifest": {
+            "ask_protocol": (
+                "one question per turn: present the wizard's current question alone, "
+                "apply the answer, re-run the wizard, then ask the next; never batch "
+                "multiple setup questions into one message or a multi-question form"
+            ),
             "collect_before_execution": [
                 "credential input channel",
                 "redfox API key via stdin",

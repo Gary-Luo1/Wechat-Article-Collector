@@ -58,6 +58,7 @@ from manage_feishu import (
     feishu_target,
     import_feishu_host_context,
 )
+from manage_feishu import _secret_file_command
 
 
 STEP_LABELS = {
@@ -120,7 +121,8 @@ ACTION_LABELS = {
     "resolve_and_save_feishu_manager": "确认接收机器人文件管理权限的飞书用户",
     "select_feishu_app": "选择并固定本技能要使用的飞书 App ID",
     "configure_private_lark_profile": "在技能私有目录中配置已选飞书应用",
-    "provide_app_secret_for_private_profile": "从飞书开放平台复制 App Secret 并经 stdin 初始化私有配置",
+    "provide_app_secret_for_private_profile": "把 App Secret 粘贴进 Agent 打开的本地密钥文件以初始化私有配置",
+    "edit_then_consume_feishu_secret_file": "在本地密钥文件中粘贴 App Secret 并保存，再由 Agent 消费该文件",
     "provision_configured_feishu_base": "自动创建并验证已批准的飞书多维表格",
     "continue_setup_then_execute": "继续完成配置并自动执行任务",
     "discover_articles": "发现并查看新文章",
@@ -606,8 +608,8 @@ def _next_step() -> tuple[dict[str, Any], str]:
         ),
         "feishu_cli_incompatible": ("lark-cli 版本不兼容，需要安装受支持版本。", "manage feishu-setup", False),
         "feishu_secret_missing": (
-            "bot 身份需要应用的 App Secret（stdin 管道提供，不经过聊天回显）：请从开放平台应用的『凭证与基础信息』复制后交给 Agent。",
-            _pipe_cmd("printf %s '<APP_SECRET>' | manage feishu-app-secret --app-id <APP_ID>"),
+            "bot 身份需要应用的 App Secret：Agent 会创建并打开一个本地密钥文件，把开放平台应用『凭证与基础信息』里的 App Secret 粘贴进去保存即可（不经过聊天，也不需要运行命令）。",
+            _secret_file_command(),
             False,
         ),
         "feishu_authorization_required": ("需要一次飞书扫码授权（最小权限）。",
@@ -1128,6 +1130,7 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
                 root / "config.lock",
                 root / "queue.lock",
                 root / "fields.json",
+                root / "feishu-app-secret.txt",
             ]
         )
         for pattern in (
@@ -1215,6 +1218,22 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("next")
     app_secret = commands.add_parser("feishu-app-secret")
     app_secret.add_argument("--app-id", default="", help="optional; must match the confirmed App ID")
+    app_secret.add_argument(
+        "--prepare-secret-file",
+        action="store_true",
+        help="create the restricted local secret file for the user to paste into",
+    )
+    app_secret.add_argument(
+        "--open-secret-file",
+        action="store_true",
+        help="open the prepared secret file with the default editor",
+    )
+    app_secret.add_argument(
+        "--secret-file",
+        metavar="PATH",
+        default="",
+        help="consume the prepared secret file (scoped, single-line, deleted after read)",
+    )
     daily = commands.add_parser("daily")
     daily.add_argument(
         "--yes",

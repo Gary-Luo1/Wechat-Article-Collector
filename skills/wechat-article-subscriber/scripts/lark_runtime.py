@@ -871,7 +871,7 @@ def _append_secret_hint(message: str) -> str:
         + " | the isolated Skill profile references an App Secret stored in the "
         "global lark-cli keychain, which cannot be decrypted from the isolated "
         "configuration directory. Copy the App Secret from the Feishu Open "
-        "Platform console (open.feishu.cn) and run the supported stdin init: "
-        "`printf %s '<APP_SECRET>' | lark config init --app-id <APP_ID> "
-        "--app-secret-stdin` (do not run `config init --new`)."
+        "Platform console (open.feishu.cn) into the prepared local secret file: "
+        "`manage feishu-app-secret --prepare-secret-file`, `--open-secret-file`, "
+        "then `--secret-file <PATH>` (do not run `config init --new`)."
     )

@@ -48,9 +48,17 @@ authorization (Base read/write + offline_access only).
 assumes prepared app information: for the current state it returns the question to
 ask the user, the exact next command, and — when no app exists yet — console
 guidance for creating one (open.feishu.cn, enterprise custom app, Base
-read/write scopes). The App Secret enters only through
-`printf %s '<APP_SECRET>' | manage feishu-app-secret`, which pipes it into the
-isolated profile and immediately probes that it works.
+read/write scopes). The App Secret enters only through the prepared local secret
+file, so the user never runs shell commands: the Agent runs
+`manage feishu-app-secret --prepare-secret-file` (creates a 0600 one-line file in
+the application state directory), then `--open-secret-file` (opens it in the
+default editor), the user pastes the secret as the file's single line and saves,
+and the Agent consumes it with `manage feishu-app-secret --secret-file <PATH>`.
+The consumer rejects symlinks, paths outside the state directory, other
+filenames, the untouched placeholder, multi-line content, and oversized input;
+it strips surrounding whitespace (so a trailing newline is harmless), deletes
+the file after one read, pipes the secret into the isolated profile, and
+immediately probes that it works.
 
 ## Search scope
 
@@ -65,11 +73,10 @@ profile can actually decrypt the App Secret. On macOS, lark-cli stores App Secre
 the system keychain bound to the global configuration directory, so the isolated clone
 usually cannot decrypt them (`app_secret_resolvable: false`). The remediation is a
 one-time copy of the App Secret from the Feishu Open Platform console
-(open.feishu.cn) piped through stdin:
-
-```text
-printf %s '<APP_SECRET>' | bash scripts/run.sh lark config init --app-id <APP_ID> --app-secret-stdin
-```
+(open.feishu.cn) pasted into the prepared secret file
+(`manage feishu-app-secret --prepare-secret-file` / `--open-secret-file` /
+`--secret-file <PATH>`; the stdin pipe `printf %s '<APP_SECRET>' | manage
+feishu-app-secret` remains available for scripted installs).
 
 Device-authorization errors mentioning a missing `client_secret` are classified as a
 configuration gap with this same guidance; never run `config init --new`, which the
@@ -178,9 +185,9 @@ the front-loaded configuration:
 2. `existing`/`dedicated`: first run
 `manage feishu-app --app-id <APP_ID>`. It derives a stable private profile
 name from the App ID. Reuse a matching local profile through the read-only
-scan/import flow above, or run
-`lark config init --app-id <APP_ID> --app-secret-stdin`; the wrapper adds the
-exact `--name` and rejects a mismatch. Do not pass `--profile`, use
+scan/import flow above, or provide the App Secret through the prepared secret
+file (`manage feishu-app-secret --prepare-secret-file` / `--open-secret-file` /
+`--secret-file <PATH>`). Do not pass `--profile`, use
    `profile use`, or run `config init --new`. If a new app is required, create
    it in the Feishu developer console first, then configure its explicit ID.
 
@@ -199,7 +206,8 @@ infer it from a display name. Every Base preflight rejects a missing/mismatched 
 and, when saved, a mismatched user Open ID before reading or writing the table. If
 strict mode blocks user identity, explain the exact policy change and obtain
 confirmation. Never request an app secret in ordinary chat; accept one only
-through a safe stdin channel.
+through the prepared local secret file (or the documented stdin channel for
+scripted installs).
 
 ## One authorization flow and resume
 
