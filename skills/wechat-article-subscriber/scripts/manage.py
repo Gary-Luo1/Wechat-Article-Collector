@@ -11,7 +11,7 @@ import platform
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from article_inbox import queue_summary
 
 from config_store import (
@@ -699,13 +699,16 @@ def _resolve_alias_by_name(name: str) -> str:
     )
 
 
-def _subscription_identities(items: list[Any]) -> set[str]:
+def _identity_set(item: Any) -> set[str]:
     return {
         str(item.get(key, "")).strip().casefold()
-        for item in items
         for key in ("name", "alias", "biz")
         if str(item.get(key, "")).strip()
     }
+
+
+def _subscription_identities(items: list[Any]) -> set[str]:
+    return {identity for item in items for identity in _identity_set(item)}
 
 
 def _partition_new_subscriptions(
@@ -719,7 +722,7 @@ def _partition_new_subscriptions(
     added: list[dict[str, str]] = []
     skipped: list[str] = []
     for candidate in candidates:
-        identities = {value.casefold() for value in candidate.values() if value}
+        identities = _identity_set(candidate)
         if not identities:
             raise ValueError("subscription entries cannot be empty")
         if identities & existing_identities:
@@ -770,10 +773,7 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
             for item in config["subscriptions"]:
                 if item is matches[0]:
                     continue
-                taken = {
-                    str(item.get(key, "")).strip().casefold()
-                    for key in ("name", "alias", "biz")
-                }
+                taken = _identity_set(item)
                 if alias.casefold() in taken:
                     raise ValueError(
                         f"alias {alias!r} is already used by subscription "
@@ -803,26 +803,18 @@ def _subscriptions(arguments: argparse.Namespace) -> dict[str, Any]:
                 raise ValueError("--biz alone cannot be discovered; provide --name or --alias")
             # Reject duplicates BEFORE resolving: the atomic re-check inside
             # mutate_add cannot refund a wasted paid search call.
-            identity = {
-                str(candidate.get(key, "")).casefold()
-                for key in ("name", "alias", "biz")
-                if candidate.get(key)
-            }
+            identity = _identity_set(candidate)
             if identity & _subscription_identities(items):
                 raise ValueError("subscription already exists")
             resolved = _resolve_alias_by_name(candidate["name"])
             candidate["alias"] = resolved
-        identity = {str(candidate.get(key, "")).casefold() for key in ("name", "alias", "biz") if candidate.get(key)}
+        identity = _identity_set(candidate)
         state: dict[str, Any] = {}
 
         def mutate_add(config: dict[str, Any]) -> dict[str, Any]:
             current_items = config["subscriptions"]
             for existing in current_items:
-                existing_identity = {
-                    str(existing.get(key, "")).casefold()
-                    for key in ("name", "alias", "biz")
-                    if existing.get(key)
-                }
+                existing_identity = _identity_set(existing)
                 if identity & existing_identity:
                     raise ValueError("subscription already exists")
             current_items.append(candidate)
@@ -1393,6 +1385,36 @@ def _failed_online_envelope(data: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+_COMMANDS: dict[str, Callable[[argparse.Namespace], tuple[dict[str, Any], str]]] = {
+    "status": lambda arguments: _status(),
+    "feishu-setup": lambda arguments: feishu_setup(),
+    "feishu-target": feishu_target,
+    "next": lambda arguments: _next_step(),
+    "feishu-app-secret": feishu_app_secret,
+    "daily": _daily,
+    "redfox-set-key": lambda arguments: _redfox_set_key(),
+    "execution-policy": _execution_policy_command,
+    "feishu-destination": lambda arguments: feishu_destination(arguments.mode),
+    "feishu-host-context": import_feishu_host_context,
+    "feishu-context": lambda arguments: feishu_context(verify=arguments.verify),
+    "config-show": lambda arguments: (redacted_config(load_config()), "none"),
+    "feishu-identity": lambda arguments: (
+        feishu_identity(arguments.identity),
+        "run_feishu_context_then_authorize_only_if_needed",
+    ),
+    "feishu-app": lambda arguments: (
+        feishu_app(arguments.app_id),
+        "reuse_or_configure_private_lark_profile",
+    ),
+    "feishu-local-profile": feishu_local_profile,
+    "feishu-grant-manager": feishu_grant_manager,
+    "feishu-create-base": feishu_create_base,
+    "feishu-auth": feishu_auth,
+    "preferences": _preferences,
+    "reset": _reset,
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_arguments = list(argv if argv is not None else sys.argv[1:])
     arguments = build_parser().parse_args(hoist_format_flag(raw_arguments))
@@ -1400,27 +1422,16 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command in SEED_CONFIG_COMMANDS:
             _seed_config_if_missing()
         next_action = "none"
-        if arguments.command == "doctor":
+        handler = _COMMANDS.get(arguments.command)
+        if handler is not None:
+            data, next_action = handler(arguments)
+        elif arguments.command == "doctor":
             data, next_action = _doctor(online=arguments.online)
             if arguments.online:
                 failed = _failed_online_envelope(data)
                 if failed is not None:
                     emit(failed, json_output=arguments.format == "json")
                     return 1
-        elif arguments.command == "status":
-            data, next_action = _status()
-        elif arguments.command == "feishu-setup":
-            data, next_action = feishu_setup()
-        elif arguments.command == "feishu-target":
-            data, next_action = feishu_target(arguments)
-        elif arguments.command == "next":
-            data, next_action = _next_step()
-        elif arguments.command == "feishu-app-secret":
-            data, next_action = feishu_app_secret(arguments)
-        elif arguments.command == "daily":
-            data, next_action = _daily(arguments)
-        elif arguments.command == "redfox-set-key":
-            data, next_action = _redfox_set_key()
         elif arguments.command == "redfox-status":
             data, next_action = _redfox_status(verify=arguments.verify)
             if arguments.verify and data.get("reachable") is False:
@@ -1439,24 +1450,6 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 emit(envelope, json_output=arguments.format == "json")
                 return 1
-        elif arguments.command == "config-show":
-            data = redacted_config(load_config())
-        elif arguments.command == "execution-policy":
-            data, next_action = _execution_policy_command(arguments)
-        elif arguments.command == "feishu-destination":
-            data, next_action = feishu_destination(arguments.mode)
-        elif arguments.command == "feishu-host-context":
-            data, next_action = import_feishu_host_context(arguments)
-        elif arguments.command == "feishu-context":
-            data, next_action = feishu_context(verify=arguments.verify)
-        elif arguments.command == "feishu-identity":
-            data = feishu_identity(arguments.identity)
-            next_action = "run_feishu_context_then_authorize_only_if_needed"
-        elif arguments.command == "feishu-app":
-            data = feishu_app(arguments.app_id)
-            next_action = "reuse_or_configure_private_lark_profile"
-        elif arguments.command == "feishu-local-profile":
-            data, next_action = feishu_local_profile(arguments)
         elif arguments.command == "feishu-manager":
             open_id = arguments.open_id or ""
             if arguments.from_authorized_user:
@@ -1468,12 +1461,6 @@ def main(argv: list[str] | None = None) -> int:
                     )
             data = feishu_manager(open_id)
             next_action = "confirm_feishu_app_and_bot"
-        elif arguments.command == "feishu-grant-manager":
-            data, next_action = feishu_grant_manager(arguments)
-        elif arguments.command == "feishu-create-base":
-            data, next_action = feishu_create_base(arguments)
-        elif arguments.command == "feishu-auth":
-            data, next_action = feishu_auth(arguments)
         elif arguments.command == "subscriptions":
             data = _subscriptions(arguments)
             if arguments.subscription_command == "add":
@@ -1484,8 +1471,6 @@ def main(argv: list[str] | None = None) -> int:
                     if arguments.dry_run
                     else "discover_articles"
                 )
-        elif arguments.command == "preferences":
-            data, next_action = _preferences(arguments)
         elif arguments.command == "feishu-disable":
             if not arguments.yes:
                 data, next_action = {"preview": "disable Feishu sync; no Base data is deleted"}, "rerun_with_yes"
@@ -1497,8 +1482,6 @@ def main(argv: list[str] | None = None) -> int:
 
                 modify_config(mutate_disable)
                 data = {"disabled": True, "base_data_deleted": False}
-        elif arguments.command == "reset":
-            data, next_action = _reset(arguments)
         else:
             # New parser commands must be wired explicitly; falling through to
             # a destructive preview by default would hide dispatch mistakes.

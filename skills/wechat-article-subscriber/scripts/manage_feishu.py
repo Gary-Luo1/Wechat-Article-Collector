@@ -47,10 +47,7 @@ from lark_runtime import (
     profile_name_for_app,
 )
 from paths import data_dir, open_with_default_app
-from protocol import (
-    _pipe_cmd,
-    _read_secret_stdin,
-)
+from protocol import _read_secret_stdin
 
 SECRET_FILE_NAME = "feishu-app-secret.txt"
 SECRET_FILE_PLACEHOLDER = "PASTE_APP_SECRET_HERE"
