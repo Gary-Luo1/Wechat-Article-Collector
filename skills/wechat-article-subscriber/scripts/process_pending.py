@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from copy import deepcopy
 import hashlib
 import io
 import json
@@ -16,40 +15,44 @@ from pathlib import Path
 from typing import Any
 
 from article_inbox import plan_digest, query_inbox
+from article_review import (
+    ArticleContentIncompleteError,
+    ArticleReadRequiredError,
+    complete_review,
+    raise_sync_failures as _raise_sync_failures,
+    sync_entry as _sync_entry,
+)
+from article_review import require_complete_content as _review_require_complete_content
 from bitable_client import (
     LarkCLIError,
     standard_field_schema,
 )
-from config_store import DEFAULT_CONFIG, ConfigError, load_config, modify_config, update_health
-from execution_policy import autopilot_policy, invalidate_for_feishu_change
+from config_store import DEFAULT_CONFIG, ConfigError, load_config, update_health
+from config_transitions import transition
+from execution_policy import autopilot_policy
 from feishu_target import production_feishu_target
 from protocol import dump, failure, success
 from queue_helpers import (
-    normalize_url,
-    read_queue,
     cleanup_processed,
-    retire_legacy_pending,
-    complete_article,
     dismiss_article,
     export_queue,
     get_pending,
-    has_verified_read,
+    is_content_truncated,
+    normalize_url,
     pending_sync_entries,
+    read_queue,
     record_verified_read,
     resolve_pending,
     restore_dismissed,
+    retire_legacy_pending,
     update_inbox_item,
     update_sync_status,
 )
-from scoring_rubric import (
-    calculate_score,
-    format_rationale,
-    is_advertisement,
-    should_sync,
-)
-
+from scoring_rubric import is_advertisement
 
 logger = logging.getLogger("wechat-process")
+
+__all__ = ["ArticleContentIncompleteError", "ArticleReadRequiredError"]
 
 
 class ArticleFetchPaidError(ValueError):
@@ -62,15 +65,8 @@ class ArticleFetchPaidError(ValueError):
         self.details = getattr(source, "details", None)
 
 
-class ArticleReadRequiredError(ValueError):
-    """A scoreable article must have been read in a prior command invocation."""
-
-    code = "ARTICLE_READ_REQUIRED"
-    retryable = False
-    next_action = "read_article_before_completion"
-
-    def __init__(self) -> None:
-        super().__init__("read the article successfully before scoring or completing it")
+def _require_complete_content(article: dict[str, Any]) -> None:
+    _review_require_complete_content(article)
 
 
 def _resolve(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -100,16 +96,18 @@ def cmd_list(account: str | None = None) -> int:
     print("Deprecated: use `process inbox` for the filtered, sortable view.", file=sys.stderr)
     pending = get_pending()
     matched = False
+    print("--- BEGIN UNTRUSTED ARTICLE METADATA ---")
     for index, article in enumerate(pending, start=1):
         if account and article.get("account") != account:
             continue
         matched = True
-        print(f"[{index}] {article.get('title', '')}")
+        print(f"[{index}] {_metadata_text(article.get('title', ''), 512)}")
         print(f"    id: {article.get('id', '')}")
-        print(f"    account: {article.get('account', '')}")
+        print(f"    account: {_metadata_text(article.get('account', ''), 128)}")
         print(f"    url: {article.get('link', '')}")
     if not matched:
         print("No pending articles")
+    print("--- END UNTRUSTED ARTICLE METADATA ---")
     return 0
 
 
@@ -135,6 +133,7 @@ def cmd_inbox(arguments: argparse.Namespace) -> int:
     if not result["items"]:
         print("No articles match the current filters")
         return 0
+    print("--- BEGIN UNTRUSTED ARTICLE METADATA ---")
     for item in result["items"]:
         article = item["article"]
         marker = (
@@ -142,8 +141,12 @@ def cmd_inbox(arguments: argparse.Namespace) -> int:
             if item["status"] == "pending"
             else f"processed / {item.get('sync_status', '')}"
         )
-        print(f"- [{marker}] {article.get('title', '')} — {article.get('account', '')}")
+        print(
+            f"- [{marker}] {_metadata_text(article.get('title', ''), 512)} — "
+            f"{_metadata_text(article.get('account', ''), 128)}"
+        )
         print(f"  {article.get('link', '')}")
+    print("--- END UNTRUSTED ARTICLE METADATA ---")
     return 0
 
 
@@ -155,7 +158,7 @@ def cmd_inbox_mark(arguments: argparse.Namespace) -> int:
         favorite = False
     state = "later" if arguments.later else ("active" if arguments.active else None)
     result = update_inbox_item(arguments.link, favorite=favorite, state=state)
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(_metadata_result(result), ensure_ascii=False))
     return 0
 
 
@@ -166,7 +169,8 @@ def cmd_dismiss(arguments: argparse.Namespace) -> int:
             {
                 "status": "dismissed",
                 "reversible": True,
-                "article": entry["article"],
+                "article": _metadata_article(entry["article"]),
+                "trust_boundary": "untrusted_article_metadata",
                 "restore_command": f"process restore --link {entry['article']['link']}",
             },
             ensure_ascii=False,
@@ -177,7 +181,16 @@ def cmd_dismiss(arguments: argparse.Namespace) -> int:
 
 def cmd_restore(arguments: argparse.Namespace) -> int:
     article = restore_dismissed(arguments.link)
-    print(json.dumps({"status": "pending", "article": article}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "status": "pending",
+                "article": _metadata_article(article),
+                "trust_boundary": "untrusted_article_metadata",
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
@@ -205,10 +218,38 @@ def cmd_digest_plan(arguments: argparse.Namespace) -> int:
         f"Digest candidates: {result['returned']} of {result['eligible']} eligible "
         f"within {result['window_hours']} hours"
     )
+    print("--- BEGIN UNTRUSTED ARTICLE METADATA ---")
     for index, item in enumerate(result["candidates"], start=1):
-        print(f"{index}. {item['title']} — {item['account']}")
+        print(
+            f"{index}. {_metadata_text(item['title'], 512)} — "
+            f"{_metadata_text(item['account'], 128)}"
+        )
         print(f"   {item['url']}")
+    print("--- END UNTRUSTED ARTICLE METADATA ---")
     return 0
+
+
+def _metadata_text(value: Any, limit: int) -> str:
+    from redfox_client import sanitize_text
+
+    return sanitize_text(value, limit)
+
+
+def _metadata_article(article: dict[str, Any]) -> dict[str, Any]:
+    projected = {key: value for key, value in article.items() if key != "content"}
+    projected["title"] = _metadata_text(projected.get("title", ""), 512)
+    projected["account"] = _metadata_text(projected.get("account", ""), 128)
+    projected["digest"] = _metadata_text(projected.get("digest", ""), 2048)
+    return projected
+
+
+def _metadata_result(result: dict[str, Any]) -> dict[str, Any]:
+    projected = dict(result)
+    article = projected.get("article")
+    if isinstance(article, dict):
+        projected["article"] = _metadata_article(article)
+    projected["trust_boundary"] = "untrusted_article_metadata"
+    return projected
 
 
 def _load_article_text(article: dict[str, Any]) -> tuple[str, bool]:
@@ -217,9 +258,13 @@ def _load_article_text(article: dict[str, Any]) -> tuple[str, bool]:
     The fetched body is not written here: the caller persists it together with
     the verified-read proof in one queue transaction.
     """
+    from redfox_client import RedfoxClient, clean_content
+
     cached = str(article.get("content") or "").strip()
     if cached:
-        return cached, True
+        cleaned = clean_content(cached)
+        if cleaned:
+            return cleaned, True
     work_uuid = str(article.get("work_uuid") or "").strip()
     if not work_uuid:
         raise ValueError(
@@ -230,8 +275,6 @@ def _load_article_text(article: dict[str, Any]) -> tuple[str, bool]:
     api_key = config["redfox"]["api_key"].strip()
     if not api_key:
         raise ConfigError("redfox API key is missing; run the redfox key setup command")
-    from redfox_client import RedfoxClient, clean_content
-
     client = RedfoxClient(api_key)
     try:
         detail, api_code = client.query_work(work_uuid)
@@ -263,10 +306,8 @@ def _print_article(article: dict[str, Any]) -> tuple[str, bool]:
 
 
 def _print_article_unprotected(article: dict[str, Any]) -> tuple[str, bool]:
-    print(f"Title: {article.get('title', '')}")
-    print(f"Account: {article.get('account', '')}")
-    print(f"URL: {article.get('link', '')}")
-    print(f"Digest: {article.get('digest', '')}")
+    from redfox_client import sanitize_text
+
     text, was_cached = _load_article_text(article)
     # The nonce makes the untrusted-content boundary impossible to forge from
     # inside the body (a plain fixed marker could be echoed by a malicious
@@ -274,14 +315,20 @@ def _print_article_unprotected(article: dict[str, Any]) -> tuple[str, bool]:
     nonce = hashlib.sha256(
         (str(article["link"]) + str(time.time_ns())).encode()
     ).hexdigest()[:8]
-    print(f"\n--- BEGIN UNTRUSTED ARTICLE CONTENT {nonce} ---")
     # One transaction stores the fetched body cache (paid-API economy) and the
     # verified-read proof together.
-    record_verified_read(
+    saved = record_verified_read(
         str(article["link"]), text, content_to_cache=None if was_cached else text
     )
+    print(f"\n--- BEGIN UNTRUSTED ARTICLE CONTENT {nonce} ---")
+    print(f"Title: {sanitize_text(article.get('title', ''), 512)}")
+    print(f"Account: {sanitize_text(article.get('account', ''), 128)}")
+    print(f"URL: {article.get('link', '')}")
+    print(f"Digest: {sanitize_text(article.get('digest', ''), 2048)}")
     print(text)
     print(f"--- END UNTRUSTED ARTICLE CONTENT {nonce} ---")
+    if is_content_truncated(saved):
+        print("Content coverage: incomplete (truncated); do not score, complete, or sync this article.")
     print(f"Content source: {article.get('content_source') or 'direct'}")
     suspected = is_advertisement(str(article.get("title", "")), text or "")
     print(f"Ad heuristic: {'suspected' if suspected else 'not detected'}")
@@ -319,185 +366,13 @@ def cmd_batch_read(limit: int) -> int:
     return 0
 
 
-def _read_dimensions(arguments: argparse.Namespace) -> Any:
-    if arguments.dims_file:
-        try:
-            # PowerShell 5.1 Out-File -Encoding UTF8 adds a BOM. utf-8-sig
-            # accepts both BOM and normal UTF-8 without weakening JSON parsing.
-            raw = arguments.dims_file.read_text(encoding="utf-8-sig")
-        except OSError as exc:
-            raise ValueError(f"cannot read --dims-file: {exc}") from exc
-        source = "--dims-file"
-    elif arguments.dims:
-        raw = arguments.dims
-        source = "--dims"
-    else:
-        raise ValueError("provide all five dimension scores with --dims or --dims-file")
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{source} is not valid JSON: {exc}") from exc
-
-
-def _score_metadata(arguments: argparse.Namespace) -> dict[str, Any]:
-    dimensions = _read_dimensions(arguments)
-    score = calculate_score(dimensions)
-    rationale = arguments.rationale or format_rationale(dimensions)
-    tags = [item.strip() for item in arguments.tags.split(",") if item.strip()]
-    return {
-        "score": score,
-        "dimensions": dimensions,
-        "summary": arguments.summary.strip(),
-        "rationale": rationale.strip(),
-        "tags": tags,
-        "ad": False,
-    }
-
-
-def _sync_entry(
-    entry: dict[str, Any],
-    *,
-    dry_run: bool = False,
-    preflight_result: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Sync one entry; returns the reusable preflight for batch callers.
-
-    ``preflight_result`` lets a sync loop run the lark-cli identity/field
-    probes once instead of per record; per-record config loading stays here so
-    the entry loop keeps a single testable seam.
-    """
-    config = load_config()
-    feishu = config["feishu"]
-    if not feishu["enabled"]:
-        raise ConfigError("Feishu sync is disabled; complete Agent setup first")
-    result = (
-        production_feishu_target(feishu)
-        .sync(
-            entry["article"],
-            entry["metadata"],
-            dry_run=dry_run,
-            preflight_result=preflight_result,
-        )
-        or {}
-    )
-    if result.get("skipped_fields"):
-        print(
-            "⚠ 部分字段因选项不匹配被跳过（在飞书补选项后重同步即可）："
-            + "、".join(map(str, result["skipped_fields"]))
-        )
-    if not dry_run:
-        update_sync_status(entry["article"]["link"], "synced")
-    preflight = result.get("preflight")
-    return preflight if isinstance(preflight, dict) else None
-
-
-def _raise_sync_failures(failures: list[Exception], *, prefix: str) -> None:
-    """Preserve the first non-retryable failure classification for automation."""
-    if not failures:
-        return
-    primary = next(
-        (
-            item
-            for item in failures
-            if not bool(getattr(item, "retryable", False))
-        ),
-        failures[0],
-    )
-    message = f"{prefix}; {len(failures)} item(s) remain pending; first failure: {primary}"
-    if isinstance(primary, LarkCLIError):
-        raise LarkCLIError(
-            message,
-            kind=primary.kind,
-            code=primary.code,
-            retryable=all(bool(getattr(item, "retryable", False)) for item in failures),
-        ) from primary
-    if isinstance(primary, ConfigError):
-        raise ConfigError(message) from primary
-    raise ValueError(message) from primary
-
-
 def cmd_done(arguments: argparse.Namespace) -> int:
-    if arguments.force_feishu and not arguments.feishu:
-        raise ValueError("--force-feishu requires --feishu")
-    article = _resolve(arguments)
-    if arguments.ad:
-        if arguments.dry_run and not arguments.feishu:
-            raise ValueError("--dry-run is only valid together with --feishu")
-        if arguments.dry_run:
-            print(f"Dry run: advertisement remains pending: {article.get('title', '')}")
-            return 0
-        complete_article(
-            article["link"],
-            {"ad": True, "reason": "advertisement/promotion"},
-            sync_status="skipped_ad",
-        )
-        print(f"Skipped advertisement: {article.get('title', '')}")
-        return 0
-    if not has_verified_read(article):
-        raise ArticleReadRequiredError()
-    try:
-        config = load_config()
-    except ConfigError:
-        if arguments.feishu:
-            raise
-        config = None
-    policy = autopilot_policy(config) if config is not None else None
-    policy_sync = bool(
-        config is not None
-        and policy is not None
-        and policy["allow_feishu_sync"]
-        and config["feishu"]["enabled"]
+    outcome = complete_review(
+        arguments,
+        resolve=_resolve,
+        sync=_sync_entry,
     )
-    if arguments.dry_run and not (arguments.feishu or policy_sync):
-        raise ValueError("--dry-run is only valid together with --feishu")
-    metadata = _score_metadata(arguments)
-    metadata["content_source"] = str(article.get("content_source") or "direct")
-    sync_requested = bool(arguments.feishu or policy_sync)
-    if sync_requested:
-        if config is None:
-            raise ConfigError("Feishu sync requires configuration")
-        if arguments.force_feishu or should_sync(
-            metadata["score"], config["settings"]["min_score"]
-        ):
-            status = "pending"
-        else:
-            status = "skipped_low_score"
-    else:
-        status = "not_requested"
-    if arguments.dry_run:
-        if status != "pending":
-            print(
-                f"Dry run: score {metadata['score']} is below the configured Feishu threshold"
-            )
-            return 0
-        _sync_entry({"article": article, "metadata": metadata}, dry_run=True)
-        print(f"Dry run succeeded; article remains pending: {article.get('title', '')}")
-        return 0
-    entry = complete_article(article["link"], metadata, sync_status=status)
-    if status == "pending":
-        # complete_article itself refuses dismissed entries atomically, so a
-        # race with dismiss surfaces as a LookupError from that call instead.
-        try:
-            _sync_entry(entry)
-        except (ConfigError, KeyError, LarkCLIError, ValueError) as exc:
-            update_sync_status(article["link"], "pending", str(exc))
-            _raise_sync_failures(
-                [exc],
-                prefix="article was saved locally but Feishu sync failed",
-            )
-    if status == "skipped_low_score" and config is not None:
-        sync_note = (
-            f"未同步：{metadata['score']} 低于阈值"
-            f"（{config['settings']['min_score']}）；确需同步可加 --force-feishu 重评"
-        )
-    else:
-        sync_note = {
-            "synced": "已同步到飞书",
-            "pending": "已入同步队列",
-            "not_requested": "未请求飞书同步（加 --feishu 可同步；批量自动化需先确认执行策略）",
-            "skipped_ad": "已按广告跳过",
-        }.get(status, status)
-    print(f"Completed: {article.get('title', '')} (score {metadata['score']}) | 同步: {sync_note}")
+    print(outcome["message"])
     return 0
 
 
@@ -531,12 +406,14 @@ def cmd_sync_all(*, dry_run: bool = False, link: str | None = None) -> int:
         try:
             reused = _sync_entry(entry, dry_run=dry_run, preflight_result=preflight_result)
             preflight_result = reused or preflight_result
-            print(f"Synced: {entry['article'].get('title', '')}")
+            print(f"Synced: {_metadata_text(entry['article'].get('title', ''), 512)}")
         except (ConfigError, KeyError, LarkCLIError, ValueError) as exc:
             failures.append(exc)
             if not dry_run:
                 update_sync_status(entry["article"]["link"], "pending", str(exc))
-            print(f"Sync failed: {entry['article'].get('title', '')}: {exc}")
+            print(
+                f"Sync failed: {_metadata_text(entry['article'].get('title', ''), 512)}: {exc}"
+            )
     _raise_sync_failures(failures, prefix="one or more Feishu sync operations failed")
     return 0
 
@@ -556,13 +433,7 @@ def cmd_feishu_check(*, save_mapping: bool = False) -> int:
             pass
         raise
     if save_mapping:
-        def mutate_mapping(config: dict[str, Any]) -> dict[str, Any]:
-            previous = deepcopy(config["feishu"])
-            config["feishu"]["field_mapping"] = check["mapping"]
-            invalidate_for_feishu_change(config, previous, config["feishu"])
-            return config
-
-        config = modify_config(mutate_mapping)
+        config = transition("feishu_mapping", check["mapping"])["config"]
     update_health("feishu", success=True)
     print(
         json.dumps(

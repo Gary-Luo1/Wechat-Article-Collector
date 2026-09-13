@@ -4,21 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
-
-FEISHU_APPROVAL_SCOPE_FIELDS = (
-    "destination",
-    "identity",
-    "binding_mode",
-    "agent_source",
-    "expected_app_id",
-    "expected_user_open_id",
-    "cli_profile",
-    "manager_open_id",
-    "base_token",
-    "table_id",
-    "schema_policy",
-    "field_mapping",
+from config_transitions import (
+    feishu_approval_scope_changed as _feishu_approval_scope_changed,
+    invalidate_for_feishu_change as _invalidate_for_feishu_change,
+    invalidate_policy as _invalidate_policy,
 )
+from feishu_setup import next_stage as _next_stage, stage_facts as _stage_facts
+
+feishu_approval_scope_changed = _feishu_approval_scope_changed
+invalidate_for_feishu_change = _invalidate_for_feishu_change
+invalidate_policy = _invalidate_policy
+next_stage = _next_stage
+stage_facts = _stage_facts
 
 
 def policy_for(config: dict[str, Any]) -> dict[str, Any]:
@@ -32,34 +29,6 @@ def autopilot_policy(config: dict[str, Any]) -> dict[str, Any] | None:
     if policy["confirmed"] and policy["mode"] == "autopilot":
         return policy
     return None
-
-
-def invalidate_policy(config: dict[str, Any]) -> None:
-    """Clear every approval that becomes unsafe after a scope-changing edit."""
-    policy = policy_for(config)
-    policy["confirmed"] = False
-    policy["allow_feishu_provisioning"] = False
-    policy["provision_base_name"] = ""
-    policy["provision_table_name"] = ""
-    policy["allow_feishu_sync"] = False
-    policy["approved_at"] = ""
-
-
-def feishu_approval_scope_changed(
-    previous: dict[str, Any], current: dict[str, Any]
-) -> bool:
-    """Whether a Feishu edit changes what the existing approval authorizes."""
-    return any(previous.get(key) != current.get(key) for key in FEISHU_APPROVAL_SCOPE_FIELDS)
-
-
-def invalidate_for_feishu_change(
-    config: dict[str, Any], previous: dict[str, Any], current: dict[str, Any]
-) -> bool:
-    """Invalidate once when a Feishu approval scope edit is detected."""
-    if not feishu_approval_scope_changed(previous, current):
-        return False
-    invalidate_policy(config)
-    return True
 
 
 def allows_automatic_provisioning(
@@ -77,114 +46,3 @@ def allows_automatic_provisioning(
         and not config["feishu"]["base_token"]
         and not config["feishu"]["table_id"]
     )
-
-
-def stage_facts(
-    config: dict[str, Any],
-    *,
-    cli: dict[str, Any] | None = None,
-    profile_secret: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Evaluate every setup gate once; the single source for stage/progress/wizard views.
-
-    ``cli`` carries lark-cli facts as collected by doctor/next; ``profile_secret``
-    lets the Feishu wizard supply its own secret probe instead.
-    """
-    feishu = config["feishu"]
-    policy = policy_for(config)
-    if profile_secret is None and isinstance(cli, dict):
-        profile_secret = cli.get("profile_secret")
-    return {
-        "redfox_key": bool(config["redfox"]["api_key"].strip()),
-        "search_window": bool(config["setup"]["search_window_confirmed"]),
-        "subscriptions": bool(config["subscriptions"]),
-        # The redfox wide library queries accounts by WeChat alias only; a
-        # display name or bare biz id can never be discovered.
-        "subscriptions_resolved": all(
-            str(item.get("alias", "")).strip() for item in config["subscriptions"]
-        ),
-        "feishu_destination": str(feishu["destination"]),
-        "policy_confirmed": bool(policy["confirmed"]),
-        "feishu_identity_confirmed": bool(config["setup"]["feishu_identity_confirmed"]),
-        "feishu_identity": str(feishu["identity"]),
-        "app_bound": bool(str(feishu.get("expected_app_id") or "").strip()),
-        "cli_checked": cli is not None,
-        "cli_compatible": bool(cli.get("compatible")) if isinstance(cli, dict) else False,
-        # Agent bindings carry host-provided credentials via config bind;
-        # asking for an App Secret there would contradict the host context.
-        "bot_secret_missing": (
-            feishu["identity"] == "bot"
-            and bool(str(feishu.get("expected_app_id") or "").strip())
-            and str(feishu.get("binding_mode") or "") != "agent"
-            and isinstance(profile_secret, dict)
-            and profile_secret.get("ready") is False
-        ),
-        "authorization_state": str(config["setup"]["feishu_authorization"]["state"]),
-        "bot_manager_missing": feishu["identity"] == "bot" and not feishu["manager_open_id"],
-        "feishu_target_configured": bool(feishu["base_token"] and feishu["table_id"]),
-        "provision_incomplete": feishu.get("provisioning") == "created" and not feishu["enabled"],
-        "feishu_failed": bool(config["health"]["feishu"]["consecutive_failures"]),
-        "feishu_unverified": not bool(config["health"]["feishu"]["last_verified_at"]),
-    }
-
-
-def next_stage(
-    config: dict[str, Any], *, cli: dict[str, Any] | None = None
-) -> tuple[str, str]:
-    """Compute the next safe setup action from persisted state and CLI facts."""
-    facts = stage_facts(config, cli=cli)
-    if not facts["redfox_key"]:
-        return "redfox_credentials_missing", "run_redfox_key_setup"
-    if not facts["search_window"]:
-        return "search_window_unconfirmed", "ask_user_for_search_window"
-    if not facts["subscriptions"]:
-        return "subscriptions_missing", "ask_for_subscription_names"
-    if not facts["subscriptions_resolved"]:
-        return "subscriptions_unresolved", "edit_subscriptions_add_alias"
-    destination = facts["feishu_destination"]
-    if destination == "undecided":
-        return "feishu_destination_unconfirmed", "ask_user_for_feishu_destination"
-    if destination == "skip":
-        if not facts["policy_confirmed"]:
-            return "execution_policy_unconfirmed", "review_and_confirm_execution_policy"
-        return "ready_wechat_only", "discover_articles"
-    if not facts["feishu_identity_confirmed"]:
-        return "feishu_identity_unconfirmed", "ask_feishu_identity_before_authorization"
-    if not facts["cli_checked"]:
-        # Do not silently broaden the search beyond the Skill's isolated
-        # runtime and the user's own local lark-cli profiles: when nothing
-        # is found locally, the user decides how to proceed.
-        return "feishu_cli_missing_or_unchecked", "ask_user_for_feishu_setup_choice"
-    if not facts["cli_compatible"]:
-        return "feishu_cli_incompatible", "install_compatible_lark_cli"
-    if facts["bot_secret_missing"]:
-        # A bot profile without an App Secret cannot call any API; ask for the
-        # secret before manager/target stages suggest commands that dead-end.
-        return "feishu_secret_missing", "provide_app_secret_for_private_profile"
-    if facts["feishu_identity"] == "user" and facts["authorization_state"] != "authorized":
-        if facts["authorization_state"] == "waiting":
-            return "feishu_authorization_waiting", "resume_existing_user_base_authorization"
-        return "feishu_authorization_required", "run_feishu_auth_start"
-    if facts["bot_manager_missing"]:
-        # Checked for every bot destination, not only approved provisioning:
-        # creation fails without a manager, so asking earlier prevents a
-        # next_stage loop that suggests commands that cannot succeed.
-        return "feishu_manager_missing", "resolve_and_save_feishu_manager"
-    if facts["provision_incomplete"]:
-        # A creation attempt wrote its recovery anchor (token+names) but did
-        # not finish grant/preflight; only a same-name rerun can resume it.
-        return "feishu_provision_incomplete", "rerun_feishu_create_base_to_resume"
-    if not facts["feishu_target_configured"]:
-        if destination == "create":
-            return "feishu_target_pending", "provision_configured_feishu_base"
-        return "feishu_target_missing", "configure_existing_feishu_target"
-    if facts["feishu_failed"]:
-        return "feishu_validation_failed", "authorize_and_run_feishu_check"
-    if facts["feishu_unverified"]:
-        return "feishu_unverified", "authorize_and_run_feishu_check"
-    # The policy is confirmed LAST for Feishu destinations: every identity,
-    # app, manager, or target edit above invalidates it, so confirming earlier
-    # would force the user through a second approval after Feishu setup.
-    if not facts["policy_confirmed"]:
-        return "execution_policy_unconfirmed", "review_and_confirm_execution_policy"
-    return "ready", "discover_articles"

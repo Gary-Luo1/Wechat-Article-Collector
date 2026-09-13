@@ -75,8 +75,8 @@ usually cannot decrypt them (`app_secret_resolvable: false`). The remediation is
 one-time copy of the App Secret from the Feishu Open Platform console
 (open.feishu.cn) pasted into the prepared secret file
 (`manage feishu-app-secret --prepare-secret-file` / `--open-secret-file` /
-`--secret-file <PATH>`; the stdin pipe `printf %s '<APP_SECRET>' | manage
-feishu-app-secret` remains available for scripted installs).
+`--secret-file <PATH>`). Never embed an App Secret in shell command text,
+including scripted installs; an approved script may use a separate process stdin channel.
 
 Device-authorization errors mentioning a missing `client_secret` are classified as a
 configuration gap with this same guidance; never run `config init --new`, which the

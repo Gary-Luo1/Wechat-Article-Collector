@@ -97,6 +97,8 @@ def test_setup_guide_explains_redfox_key_and_search_window(capsys):
     assert data["redfox_credentials"]["signup_url"] == "https://redfox.hk/"
     assert data["search_window"]["default_if_skipped"] == 24
     assert data["configuration_manifest"]["blocking_rule"]
+    assert "printf" not in json.dumps(data)
+    assert "missing decisions" in data["configuration_manifest"]["ask_protocol"]
 
 
 def test_full_agent_setup_does_not_silently_skip_feishu(
@@ -1810,6 +1812,32 @@ def test_safe_lark_arguments_pins_profile_and_blocks_profile_mutation(capsys):
     capsys.readouterr()
 
 
+def test_agent_lark_arguments_allow_only_bounded_read_and_auth_flow():
+    import lark_runtime
+
+    assert lark_runtime.safe_agent_lark_arguments(["--version"]) == ["--version"]
+    assert lark_runtime.safe_agent_lark_arguments(
+        ["auth", "login", "--domain", "base", "--no-wait", "--json"]
+    )[-6:] == ["auth", "login", "--domain", "base", "--no-wait", "--json"]
+    assert lark_runtime.safe_agent_lark_arguments(
+        ["auth", "login", "--device-code", "safe-code_123"]
+    )[-4:] == ["auth", "login", "--device-code", "safe-code_123"]
+    assert lark_runtime.safe_agent_lark_arguments(
+        ["auth", "qrcode", "https://example.test/verify", "--ascii"]
+    )[-4:] == ["auth", "qrcode", "https://example.test/verify", "--ascii"]
+    for unsafe in (
+        ["base", "+record-upsert", "--yes"],
+        ["drive", "+delete", "--yes"],
+        ["wiki", "+member-remove"],
+        ["auth", "login", "--domain", "all", "--no-wait", "--json"],
+        ["auth", "qrcode", "https://example.test/verify", "--output", "../../outside.png"],
+        ["auth", "qrcode", "https://example.test/verify", "--arbitrary-flag"],
+        ["auth", "qrcode", "http://example.test/verify", "--ascii"],
+    ):
+        with pytest.raises(ValueError, match="outside the Agent-facing allowlist"):
+            lark_runtime.safe_agent_lark_arguments(unsafe)
+
+
 def test_agent_bind_is_pinned_to_imported_host_app_and_source():
     import lark_runtime
     from config_store import load_config, save_config
@@ -1836,6 +1864,7 @@ def test_agent_bind_is_pinned_to_imported_host_app_and_source():
         "user-default",
     ]
     assert lark_runtime.safe_lark_arguments(expected) == expected
+    assert lark_runtime.safe_agent_lark_arguments(expected) == expected
     with pytest.raises(ValueError, match="does not match"):
         lark_runtime.safe_lark_arguments(
             [
@@ -1845,8 +1874,12 @@ def test_agent_bind_is_pinned_to_imported_host_app_and_source():
                 "lark-channel",
                 "--app-id",
                 "cli_otherbot",
+                "--identity",
+                "user-default",
             ]
         )
+    with pytest.raises(ValueError, match="user-default identity"):
+        lark_runtime.safe_agent_lark_arguments([*expected, "--yes"])
 
 
 def test_config_init_is_forced_to_confirmed_named_profile():
@@ -2147,6 +2180,9 @@ def test_payload_error_not_configured_maps_to_secret_fix():
     assert isinstance(error, LarkCLIError)
     assert error.kind == "config"
     assert "feishu-app-secret" in str(error)
+    assert "--prepare-secret-file" in str(error)
+    assert "--secret-file <PATH>" in str(error)
+    assert "printf" not in str(error)
 
 
 def test_payload_error_generic_failure_includes_raw_response():
@@ -2204,7 +2240,7 @@ def test_bot_identity_readiness_maps_to_bot_credentials_next_action(
 
     monkeypatch.setattr(
         bitable_client,
-        "_run_lark",
+        "run_lark",
         lambda args, **kwargs: {
             "data": {
                 "appid": "cli_x",

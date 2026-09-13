@@ -85,7 +85,7 @@ def test_consume_strips_whitespace_stores_and_deletes(isolated_home, monkeypatch
         captured["argv"] = argv
         captured["input_text"] = kwargs.get("input_text")
 
-    monkeypatch.setattr(manage_feishu, "_run_lark", fake_run_lark)
+    monkeypatch.setattr(manage_feishu, "run_lark", fake_run_lark)
     monkeypatch.setattr(
         manage_feishu,
         "probe_app_secret_resolution",

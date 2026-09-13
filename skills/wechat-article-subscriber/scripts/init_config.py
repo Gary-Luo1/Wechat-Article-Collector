@@ -4,130 +4,34 @@
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 import getpass
 import json
 import logging
 import os
-from pathlib import Path
 import stat
 import subprocess
 import sys
 import tempfile
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from config_store import (
     DEFAULT_CONFIG,
-    LEGACY_FIELD_MAPPING,
     ConfigError,
     load_config,
-    modify_config,
     save_config,
     validate_config,
 )
-from execution_policy import invalidate_for_feishu_change
+from config_transitions import (
+    apply_agent_payload,
+    apply_section_patch,
+    persist,
+)
 from paths import config_path, data_dir, secure_write_json
 from protocol import dump, emit, failure, success
 
-
 MAX_AGENT_INPUT_BYTES = 256 * 1024
-AGENT_INPUT_KEYS = {
-    "redfox_api_key",
-    "subscriptions",
-    "feishu_base_token",
-    "feishu_table_id",
-    "feishu",
-    "settings",
-    "preferences",
-    "execution_policy",
-}
-
-FEISHU_INPUT_KEYS = {
-    "destination",
-    "enabled",
-    "identity",
-    "binding_mode",
-    "agent_source",
-    "expected_app_id",
-    "expected_user_open_id",
-    "manager_open_id",
-    "base_token",
-    "table_id",
-    "provisioning",
-    "schema_policy",
-    "field_mapping",
-}
-SETTINGS_INPUT_KEYS = {
-    "check_hours",
-    "request_delay",
-    "max_articles_per_account",
-    "content_dedup",
-    "min_score",
-    "output_language",
-}
-PREFERENCES_INPUT_KEYS = {
-    "include_topics",
-    "exclude_keywords",
-    "preferred_accounts",
-    "digest_hours",
-    "digest_limit",
-}
-EXECUTION_POLICY_INPUT_KEYS = {
-    "confirmed",
-    "mode",
-    "allow_feishu_provisioning",
-    "provision_base_name",
-    "provision_table_name",
-    "allow_feishu_sync",
-    "approved_at",
-    "scope_version",
-}
-
-
-def _optional_string(payload: dict[str, Any], key: str) -> str:
-    value = payload.get(key, "")
-    if not isinstance(value, str):
-        raise ConfigError(f"{key} must be a string")
-    return value.strip()
-
-
-def _normalize_subscriptions(value: Any) -> list[dict[str, str]]:
-    if not isinstance(value, list) or not value:
-        raise ConfigError("subscriptions must be a non-empty list")
-    if len(value) > 100:
-        raise ConfigError("subscriptions cannot contain more than 100 accounts")
-    normalized: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for index, item in enumerate(value):
-        if isinstance(item, str):
-            subscription = {"name": item.strip(), "alias": "", "biz": ""}
-        elif isinstance(item, dict):
-            unexpected = set(item) - {"name", "alias", "biz"}
-            if unexpected:
-                raise ConfigError(
-                    f"subscriptions[{index}] contains unsupported keys: {sorted(unexpected)}"
-                )
-            subscription = {}
-            for key in ("name", "alias", "biz"):
-                raw = item.get(key, "")
-                if not isinstance(raw, str):
-                    raise ConfigError(f"subscriptions[{index}].{key} must be a string")
-                subscription[key] = raw.strip()
-        else:
-            raise ConfigError(f"subscriptions[{index}] must be a name or object")
-        identity = tuple(subscription[key].casefold() for key in ("name", "alias", "biz"))
-        if not any(identity):
-            raise ConfigError(f"subscriptions[{index}] needs name, alias, or biz")
-        if identity not in seen:
-            normalized.append(subscription)
-            seen.add(identity)
-    return normalized
-
-
-def _reset_health(config: dict[str, Any], section: str) -> None:
-    """Reset one health section back to its default state."""
-    config["health"][section] = deepcopy(DEFAULT_CONFIG["health"][section])
-
 
 
 def local_config_template() -> dict[str, Any]:
@@ -287,9 +191,9 @@ def setup_guide() -> dict[str, Any]:
                 "the chat platform even when the Agent never repeats it"
             ),
             "stdin_command": (
-                "printf is shell-history-safe only inside scripts; in an interactive "
-                "shell prefer `cat | manage redfox-set-key` so the key never lands in "
-                "command history"
+                "Use a process stdin API with setup --agent-stdin; never interpolate a "
+                "secret into shell text. Prefer local self-editing or hidden prompts "
+                "when the Agent lacks a separate stdin channel."
             ),
             "self_edit": f"edit the local configuration file at {target}",
             "local_hidden_prompt": "run setup locally and enter values at the hidden prompts",
@@ -306,7 +210,7 @@ def setup_guide() -> dict[str, Any]:
             "required_fields": {
                 "redfox.api_key": (
                     "redfox.hk API key; preferred input channel is "
-                    "`printf %s '<KEY>' | manage redfox-set-key`"
+                    "local self-editing or the hidden prompts in setup"
                 ),
                 "subscriptions": (
                     "account entries; each needs the WeChat alias (微信号) — the data source "
@@ -333,8 +237,8 @@ def setup_guide() -> dict[str, Any]:
             "signup_url": "https://redfox.hk/",
             "steps": [
                 "Register at redfox.hk and create an API key.",
-                "Pipe the key into the Skill: printf %s '<KEY>' | manage redfox-set-key.",
-                "Never paste the key into ordinary chat or command-line arguments.",
+                "Edit the prepared local configuration file or run setup locally for hidden input.",
+                "Prefer local entry; chat requires explicit retention consent and must be permitted by host rules. Never put secrets in command text.",
             ],
             "note": "paid per-call API; data covers articles from 2026-04-01 onward",
         },
@@ -351,13 +255,13 @@ def setup_guide() -> dict[str, Any]:
         },
         "configuration_manifest": {
             "ask_protocol": (
-                "one question per turn: present the wizard's current question alone, "
-                "apply the answer, re-run the wizard, then ask the next; never batch "
-                "multiple setup questions into one message or a multi-question form"
+                "Apply values already supplied, then re-run the wizard and ask only for "
+                "missing decisions. Related non-secret questions may be grouped; "
+                "keep credential-channel consent and authorization explicit."
             ),
             "collect_before_execution": [
                 "credential input channel",
-                "redfox API key via stdin",
+                "redfox API key via local self-editing, hidden prompt, or a supported safe transport",
                 "subscriptions (preview/apply the bundled default roster first, then user adjustments)",
                 "search window",
                 "whether routine Feishu provisioning and qualified-record sync are allowed",
@@ -408,265 +312,16 @@ def setup_guide() -> dict[str, Any]:
     }
 
 
-def _normalize_feishu(
-    value: Any, existing: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    if value is None:
-        return deepcopy(DEFAULT_CONFIG["feishu"])
-    if not isinstance(value, dict):
-        raise ConfigError("feishu must be an object")
-    unexpected = set(value) - FEISHU_INPUT_KEYS
-    if unexpected:
-        raise ConfigError(f"feishu contains unsupported keys: {sorted(unexpected)}")
-    normalized = deepcopy(DEFAULT_CONFIG["feishu"])
-    normalized.update(value)
-    if existing is not None:
-        # Partial patches keep every omitted field unchanged. Comparing against
-        # rebuilt defaults would treat untouched binding/identity/mapping fields
-        # as "scope changed" and spuriously invalidate the execution policy.
-        for key in set(normalized) - set(value):
-            normalized[key] = deepcopy(existing.get(key, DEFAULT_CONFIG["feishu"][key]))
-        if (
-            str(existing.get("expected_app_id") or "").strip()
-            != str(normalized.get("expected_app_id") or "").strip()
-        ):
-            # cli_profile is derived from the App ID; a new App ID must not
-            # inherit the old profile.
-            normalized["cli_profile"] = ""
-    if "destination" not in value:
-        if any(key in value for key in ("base_token", "table_id", "provisioning", "enabled")):
-            has_target = bool(normalized.get("base_token")) and bool(normalized.get("table_id"))
-            if normalized.get("provisioning") == "created":
-                normalized["destination"] = "create"
-            elif has_target or normalized.get("provisioning") == "existing":
-                normalized["destination"] = "existing"
-            elif value.get("enabled") is False:
-                # Backward-compatible explicit skip. Omitting the entire Feishu
-                # object still leaves the full setup in the undecided state.
-                normalized["destination"] = "skip"
-    # Supplying a complete target means sync is intentionally enabled unless
-    # the Agent explicitly sends enabled=false. Only a target supplied by this
-    # patch (not one preserved from the existing config) implies enablement.
-    if (
-        "enabled" not in value
-        and "base_token" in value
-        and "table_id" in value
-        and normalized.get("base_token")
-        and normalized.get("table_id")
-    ):
-        normalized["enabled"] = True
-    return normalized
-
-
-def _record_feishu_identity_choice(config: dict[str, Any], value: Any) -> None:
-    if not isinstance(value, dict) or "identity" not in value:
-        return
-    identity = str(value["identity"])
-    authorization = config["setup"]["feishu_authorization"]
-    if (
-        not config["setup"]["feishu_identity_confirmed"]
-        or authorization.get("identity") != identity
-    ):
-        config["setup"]["feishu_authorization"] = {
-            **dict(DEFAULT_CONFIG["setup"]["feishu_authorization"]),
-            "state": "not_required" if identity == "bot" else "not_started",
-            "identity": identity,
-        }
-    config["setup"]["feishu_identity_confirmed"] = True
-
-
 def config_from_agent_payload(
     payload: Any, *, existing: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ConfigError("Agent configuration must be a JSON object")
-    unexpected = set(payload) - AGENT_INPUT_KEYS
-    if unexpected:
-        raise ConfigError(f"Agent configuration contains unsupported keys: {sorted(unexpected)}")
-    if "feishu" in payload and (
-        "feishu_base_token" in payload or "feishu_table_id" in payload
-    ):
-        raise ConfigError("use feishu or legacy Feishu fields, not both")
-    previous_feishu: dict[str, Any] | None = None
-    if existing is not None:
-        existing = validate_config(deepcopy(existing))
-        previous_feishu = deepcopy(existing["feishu"])
-    if "feishu" in payload:
-        feishu = _normalize_feishu(
-            payload["feishu"],
-            existing=existing["feishu"] if existing is not None else None,
-        )
-    else:
-        base_token = _optional_string(payload, "feishu_base_token")
-        table_id = _optional_string(payload, "feishu_table_id")
-        if bool(base_token) != bool(table_id):
-            raise ConfigError("provide both Feishu Base token and table ID, or leave both empty")
-        feishu = (
-            deepcopy(existing["feishu"])
-            if existing is not None
-            else deepcopy(DEFAULT_CONFIG["feishu"])
-        )
-        if base_token and table_id:
-            feishu.update(
-                {
-                    "destination": "existing",
-                    "enabled": True,
-                    "base_token": base_token,
-                    "table_id": table_id,
-                    "provisioning": "existing",
-                    "field_mapping": deepcopy(LEGACY_FIELD_MAPPING),
-                }
-            )
-        elif "feishu_base_token" in payload or "feishu_table_id" in payload:
-            feishu["destination"] = "skip"
-    config = deepcopy(existing) if existing is not None else deepcopy(DEFAULT_CONFIG)
-    if "redfox_api_key" in payload:
-        api_key = str(payload.get("redfox_api_key") or "").strip()
-        if not api_key:
-            raise ConfigError("redfox_api_key must be a non-empty string")
-        config["redfox"] = {"api_key": api_key}
-    elif existing is None and not config["redfox"]["api_key"].strip():
-        raise ConfigError("first-time setup requires redfox_api_key")
-    if "subscriptions" in payload:
-        config["subscriptions"] = _normalize_subscriptions(
-            payload.get("subscriptions")
-        )
-        _reset_health(config, "subscriptions")
-    elif existing is None:
-        # First-time setup still requires a non-empty subscription list.
-        config["subscriptions"] = _normalize_subscriptions(
-            payload.get("subscriptions")
-        )
-    config["feishu"] = feishu
-    if "feishu" in payload:
-        _record_feishu_identity_choice(config, payload["feishu"])
-        if previous_feishu is not None:
-            invalidate_for_feishu_change(config, previous_feishu, config["feishu"])
-    if "settings" in payload:
-        config["settings"] = _normalize_settings(
-            payload["settings"], partial=True, existing=config["settings"]
-        )
-        if "check_hours" in payload["settings"]:
-            config["setup"]["search_window_confirmed"] = True
-    if "preferences" in payload:
-        config["preferences"] = _normalize_preferences(
-            payload["preferences"],
-            partial=True,
-            existing=config["preferences"],
-        )
-    if "execution_policy" in payload:
-        config["setup"]["execution_policy"] = _normalize_execution_policy(
-            payload["execution_policy"],
-            partial=True,
-            existing=config["setup"]["execution_policy"],
-        )
-    return validate_config(config)
-
-
-def _merge_section(
-    value: Any,
-    *,
-    label: str,
-    keys: set[str],
-    defaults: dict[str, Any],
-    partial: bool,
-    existing: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Validate one configuration section patch and merge it over its base.
-
-    Partial patches keep every omitted key from the existing section (or from
-    the defaults when none exists yet); a full replacement starts empty.
-    """
-    if not isinstance(value, dict):
-        raise ConfigError(f"{label} must be an object")
-    unexpected = set(value) - keys
-    if unexpected:
-        raise ConfigError(f"{label} contains unsupported keys: {sorted(unexpected)}")
-    if partial and existing is not None:
-        normalized = deepcopy(existing)
-    else:
-        normalized = deepcopy(defaults) if partial else {}
-    normalized.update(value)
-    return normalized
-
-
-def _normalize_settings(
-    value: Any, *, partial: bool, existing: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    return _merge_section(
-        value,
-        label="settings",
-        keys=SETTINGS_INPUT_KEYS,
-        defaults=DEFAULT_CONFIG["settings"],
-        partial=partial,
-        existing=existing,
-    )
-
-
-def _normalize_preferences(
-    value: Any, *, partial: bool, existing: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    return _merge_section(
-        value,
-        label="preferences",
-        keys=PREFERENCES_INPUT_KEYS,
-        defaults=DEFAULT_CONFIG["preferences"],
-        partial=partial,
-        existing=existing,
-    )
-
-
-def _normalize_execution_policy(
-    value: Any, *, partial: bool, existing: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    return _merge_section(
-        value,
-        label="execution_policy",
-        keys=EXECUTION_POLICY_INPUT_KEYS,
-        defaults=DEFAULT_CONFIG["setup"]["execution_policy"],
-        partial=partial,
-        existing=existing,
-    )
+    return apply_agent_payload(payload, existing=existing)
 
 
 def _apply_section_patch(
     config: dict[str, Any], section: str, payload: Any
 ) -> dict[str, Any]:
-    if section == "feishu":
-        previous_feishu = config["feishu"]
-        normalized_feishu = _normalize_feishu(payload, existing=config["feishu"])
-        config["feishu"] = normalized_feishu
-        invalidate_for_feishu_change(config, previous_feishu, normalized_feishu)
-        _record_feishu_identity_choice(config, payload)
-    elif section == "subscriptions":
-        value = payload.get("subscriptions") if isinstance(payload, dict) else payload
-        config["subscriptions"] = _normalize_subscriptions(value)
-        _reset_health(config, "subscriptions")
-    elif section == "settings":
-        config["settings"] = _normalize_settings(
-            payload, partial=True, existing=config["settings"]
-        )
-        if "check_hours" in payload:
-            config["setup"]["search_window_confirmed"] = True
-    elif section == "preferences":
-        config["preferences"] = _normalize_preferences(payload, partial=True)
-    elif section == "execution_policy":
-        config["setup"]["execution_policy"] = _normalize_execution_policy(
-            payload, partial=True, existing=config["setup"]["execution_policy"]
-        )
-    elif section == "redfox":
-        if not isinstance(payload, dict):
-            raise ConfigError("redfox credential update must be an object")
-        unexpected = set(payload) - {"api_key"}
-        if unexpected:
-            raise ConfigError(f"redfox update contains unsupported keys: {sorted(unexpected)}")
-        api_key = str(payload.get("api_key") or "").strip()
-        if not api_key:
-            raise ConfigError("redfox.api_key must be a non-empty string")
-        config["redfox"] = {"api_key": api_key}
-    else:
-        raise ConfigError(f"unsupported setup section: {section}")
-    return validate_config(config)
+    return apply_section_patch(config, section, payload)
 
 
 def _save_agent_raw(raw: str, *, section: str = "full", json_output: bool = False) -> int:
@@ -676,20 +331,9 @@ def _save_agent_raw(raw: str, *, section: str = "full", json_output: bool = Fals
     try:
         payload = json.loads(raw.lstrip("\ufeff"))
         if section == "full":
-            try:
-                config = modify_config(
-                    lambda current: config_from_agent_payload(payload, existing=current)
-                )
-            except ConfigError as exc:
-                if "configuration not found" not in str(exc):
-                    raise
-                # First-time setup: no existing config to merge, build from defaults.
-                config = config_from_agent_payload(payload)
-                save_config(config)
+            config = persist("agent_payload", payload)
         else:
-            config = modify_config(
-                lambda current: _apply_section_patch(current, section, payload)
-            )
+            config = persist(f"section:{section}", payload)
         path = config_path()
     except (ConfigError, OSError, json.JSONDecodeError, UnicodeError) as exc:
         if json_output:

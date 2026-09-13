@@ -1,50 +1,53 @@
 """Feishu onboarding and identity handlers for the manage command."""
 
 from __future__ import annotations
+
 import argparse
-from datetime import datetime, timezone
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
 from bitable_client import (
     create_standard_base,
-    probe_app_secret_resolution,
     created_base_identifiers,
     feishu_identity_context,
     grant_bot_created_resource,
     list_fields,
     preflight_feishu,
+    probe_app_secret_resolution,
     resolve_lark_profile,
     standard_field_schema,
     verify_feishu_identity,
 )
-
 from config_store import (
-    DEFAULT_CONFIG,
     ConfigError,
     load_config,
-    modify_config,
     update_health,
 )
-
+from config_transitions import transition
 from execution_policy import (
     allows_automatic_provisioning,
-    invalidate_policy,
     policy_for,
-    stage_facts,
 )
-
+from feishu_setup import (
+    bind_agent_context,
+    choose_app,
+    choose_destination,
+    choose_identity,
+    detect_agent_source,
+    save_authorization_state,
+    setup_status,
+    set_manager,
+)
 from lark_runtime import (
     LarkCLIError,
-    _run_lark,
     discover_global_lark_profiles,
     import_global_lark_profile,
     private_profile_secret_state,
-    profile_name_for_app,
+    run_lark,
 )
 from paths import data_dir, open_with_default_app
 from protocol import _read_secret_stdin
@@ -53,18 +56,9 @@ SECRET_FILE_NAME = "feishu-app-secret.txt"
 SECRET_FILE_PLACEHOLDER = "PASTE_APP_SECRET_HERE"
 SECRET_FILE_MAX_BYTES = 64 * 1024
 
+
 def _authorization(config: dict[str, Any]) -> dict[str, Any]:
     return config["setup"]["feishu_authorization"]
-
-
-def _reset_authorization(config: dict[str, Any], identity: str) -> None:
-    state = "not_required" if identity == "bot" else "not_started"
-    config["setup"]["feishu_authorization"] = {
-        **dict(DEFAULT_CONFIG["setup"]["feishu_authorization"]),
-        "state": state,
-        "identity": identity,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
 
 
 def _expected_app_id(config: dict[str, Any]) -> str:
@@ -93,55 +87,16 @@ def _sync_cli_profile(
     if current["feishu"].get("cli_profile") == resolution["profile"]:
         return current, resolution
 
-    def _set_profile(config: dict[str, Any]) -> dict[str, Any]:
-        config["feishu"]["cli_profile"] = resolution["profile"]
-        return config
-
-    return modify_config(_set_profile), resolution
-
-
-AGENT_SOURCE_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("openclaw", ("OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_GATEWAY_TOKEN")),
-    ("hermes", ("HERMES_HOME", "HERMES_STATE_DIR")),
-    ("lark-channel", ("LARK_CHANNEL", "LARK_CHANNEL_HOME", "LARK_CHANNEL_APP_ID")),
-)
+    return transition("feishu_profile", resolution["profile"])["config"], resolution
 
 
 def _detect_agent_source() -> str:
-    """Return the hosting Agent platform from its environment signals."""
-    for source, names in AGENT_SOURCE_SIGNALS:
-        if any(os.environ.get(name) for name in names):
-            return source
-    return ""
+    """Compatibility adapter for the setup journey's source detector."""
+    return detect_agent_source()
 
 
 def feishu_destination(destination: str) -> tuple[dict[str, Any], str]:
-    state: dict[str, Any] = {}
-
-    def mutate(config: dict[str, Any]) -> dict[str, Any]:
-        previous = str(config["feishu"].get("destination") or "undecided")
-        config["feishu"]["destination"] = destination
-        if destination == "skip":
-            config["feishu"]["enabled"] = False
-        state["previous"] = previous
-        state["changed"] = previous != destination
-        if state["changed"]:
-            invalidate_policy(config)
-        return config
-
-    modify_config(mutate)
-    next_action = (
-        "review_and_confirm_execution_policy"
-        if destination == "skip"
-        else "run_feishu_context_then_authorize_only_if_needed"
-    )
-    return {
-        "destination": destination,
-        "previous_destination": state["previous"],
-        "explicit_user_choice_required": True,
-        "target_or_credentials_deleted": False,
-        "execution_policy_invalidated": state["changed"],
-    }, next_action
+    return choose_destination(destination)
 
 
 def import_feishu_host_context(
@@ -185,79 +140,7 @@ def import_feishu_host_context(
     if not sender_open_id.startswith("ou_"):
         raise ValueError("trusted Feishu host sender Open ID must start with ou_")
 
-    state: dict[str, Any] = {}
-
-    def mutate(config: dict[str, Any]) -> dict[str, Any]:
-        destination = config["feishu"]["destination"]
-        if destination not in {"existing", "create"}:
-            raise ValueError(
-                "choose existing or create as the Feishu destination before importing "
-                "the current bot context"
-            )
-        if (
-            config["setup"]["feishu_identity_confirmed"]
-            and config["feishu"]["identity"] != "bot"
-        ):
-            raise ValueError(
-                "the current setup already confirms user identity; do not silently switch "
-                "it to the conversational bot"
-            )
-        expected_app_id = _expected_app_id(config)
-        if expected_app_id and expected_app_id != app_id:
-            raise ValueError(
-                "the current Feishu conversation App ID conflicts with the saved App ID"
-            )
-        manager_open_id = str(config["feishu"].get("manager_open_id") or "").strip()
-        if manager_open_id and manager_open_id != sender_open_id:
-            raise ValueError(
-                "the current Feishu sender conflicts with the saved human manager"
-            )
-
-        previous_scope = (
-            config["feishu"]["identity"],
-            config["feishu"]["binding_mode"],
-            config["feishu"]["agent_source"],
-            config["feishu"]["expected_app_id"],
-            config["feishu"]["manager_open_id"],
-        )
-        config["feishu"].update(
-            {
-                "identity": "bot",
-                "binding_mode": "agent",
-                "agent_source": source,
-                "expected_app_id": app_id,
-                "cli_profile": "",
-                "expected_user_open_id": "",
-                "manager_open_id": sender_open_id,
-            }
-        )
-        config["setup"]["feishu_identity_confirmed"] = True
-        _reset_authorization(config, "bot")
-        current_scope = (
-            config["feishu"]["identity"],
-            config["feishu"]["binding_mode"],
-            config["feishu"]["agent_source"],
-            config["feishu"]["expected_app_id"],
-            config["feishu"]["manager_open_id"],
-        )
-        state["changed"] = previous_scope != current_scope
-        if state["changed"]:
-            config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
-            invalidate_policy(config)
-        return config
-
-    modify_config(mutate)
-    return {
-        "source": source,
-        "app_id": app_id,
-        "identity": "bot",
-        "identity_confirmed": True,
-        "manager_configured_from_sender": True,
-        "sender_open_id_included": False,
-        "binding_mode": "agent",
-        "execution_policy_invalidated": state["changed"],
-        "host_context_contains_secrets": False,
-    }, "bind_detected_feishu_bot"
+    return bind_agent_context(source, app_id, sender_open_id)
 
 
 def feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
@@ -379,75 +262,13 @@ def feishu_context(*, verify: bool) -> tuple[dict[str, Any], str]:
 
 
 def feishu_identity(identity: str) -> dict[str, Any]:
-    state: dict[str, Any] = {}
-
-    def mutate(config: dict[str, Any]) -> dict[str, Any]:
-        previous = str(config["feishu"].get("identity") or "user")
-        was_confirmed = bool(config["setup"]["feishu_identity_confirmed"])
-        config["feishu"]["identity"] = identity
-        config["setup"]["feishu_identity_confirmed"] = True
-        state["previous"] = previous
-        state["changed"] = previous != identity or not was_confirmed
-        if state["changed"]:
-            config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
-            _reset_authorization(config, identity)
-            invalidate_policy(config)
-        return config
-
-    config = modify_config(mutate)
-    return {
-        "identity": identity,
-        "previous_identity": state["previous"],
-        "identity_confirmed": True,
-        "authorization_policy": (
-            "reuse an existing valid user authorization; otherwise start one Base authorization flow"
-            if identity == "user"
-            else "use bot credentials and backend scopes; never start user authorization"
-        ),
-        "authorization": dict(_authorization(config)),
-    }
+    return choose_identity(identity)
 
 
 def feishu_app(app_id: str) -> dict[str, Any]:
-    normalized = app_id.strip()
-    if not re.fullmatch(r"cli_[A-Za-z0-9]+", normalized):
-        raise ValueError("Feishu App ID must start with cli_ and contain only letters/digits")
-    profile = profile_name_for_app(normalized)
-
-    def mutate(config: dict[str, Any]) -> dict[str, Any]:
-        if not config["setup"]["feishu_identity_confirmed"]:
-            raise ValueError("select user or bot identity before selecting the Feishu app")
-        previous = str(config["feishu"].get("expected_app_id") or "")
-        config["feishu"]["expected_app_id"] = normalized
-        config["feishu"]["cli_profile"] = profile
-        if not config["feishu"].get("binding_mode"):
-            config["feishu"]["binding_mode"] = "existing"
-        if previous != normalized:
-            config["health"]["feishu"] = dict(DEFAULT_CONFIG["health"]["feishu"])
-            _reset_authorization(config, config["feishu"]["identity"])
-            invalidate_policy(config)
-            config["feishu"].update(
-                {
-                    "enabled": False,
-                    "expected_user_open_id": "",
-                    "manager_open_id": "",
-                    "base_token": "",
-                    "table_id": "",
-                    "provisioning": "",
-                    "field_mapping": {},
-                }
-            )
-        return config
-
-    modify_config(mutate)
-    return {
-        "app_selected": True,
-        "app_id_included": False,
-        "private_profile": profile,
-        "global_profiles_modified": False,
-        "next_command": _secret_file_command(),
-        "profile_name_added_automatically": True,
-    }
+    result = choose_app(app_id)
+    result["next_command"] = _secret_file_command()
+    return result
 
 
 def _parse_feishu_base_url(url: str) -> tuple[str, str]:
@@ -482,19 +303,9 @@ def feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     identity = config["feishu"]["identity"]
     fields = list_fields(base_token, table_id, identity=identity)
 
-    def mutate_target(cfg: dict[str, Any]) -> dict[str, Any]:
-        cfg["feishu"].update(
-            {
-                "destination": "existing",
-                "enabled": True,
-                "base_token": base_token,
-                "table_id": table_id,
-                "provisioning": "existing",
-            }
-        )
-        return cfg
-
-    saved = modify_config(mutate_target)
+    saved = transition(
+        "feishu_target", {"base_token": base_token, "table_id": table_id}
+    )["config"]
     return {
         "base_token": base_token,
         "table_id": table_id,
@@ -505,155 +316,15 @@ def feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
 
 
 def feishu_setup() -> tuple[dict[str, Any], str]:
-    """Dialogue-ready Feishu onboarding state: what to ask, what to run next.
-
-    A fresh user needs no app information prepared: this command reports the
-    current stage, the question to put to the user, and the exact next
-    command, including console guidance for creating a new app.
-    """
     config = load_config()
-    feishu = config["feishu"]
-    app_id = _expected_app_id(config)
     secret_state = private_profile_secret_state()
-    facts = stage_facts(config, profile_secret=secret_state)
-    state: dict[str, Any] = {
-        "identity_confirmed": facts["feishu_identity_confirmed"],
-        "identity": facts["feishu_identity"],
-        "app_bound": facts["app_bound"],
-        "app_id": app_id,
-        "profile": feishu["cli_profile"],
-        "authorization": facts["authorization_state"],
-        "destination": facts["feishu_destination"],
-        "target_configured": facts["feishu_target_configured"],
-    }
-    guide = {
-        "create_app_url": "https://open.feishu.cn/app?lang=zh-CN",
-        "create_app_steps": [
-            "个人账号需先拥有一个飞书团队/企业（免费创建即可），然后在开放平台创建企业自建应用。",
-            "在 权限管理 搜索并勾选多维表格相关权限（控制台以中文名展示，例如「查看、评论、编辑和管理多维表格」及其子项，覆盖表格/字段/记录的读写）。",
-            "在 可用范围 里把自己加入应用可用人员，否则授权与写入会被拒绝。",
-            "发布应用版本；发布后从 凭证与基础信息 复制 App ID 和 App Secret。",
-        ],
-    }
-    if not state["identity_confirmed"]:
-        state.update(
-            next_question="飞书用哪种身份写入：个人用户（扫码授权一次）还是机器人应用？",
-            next_command="manage feishu-identity --as user|bot",
-        )
-        return state, "ask_feishu_identity_before_authorization"
-    if not state["app_bound"]:
-        state.update(
-            next_question="请提供飞书应用的 App ID（或按引导去开放平台创建一个新应用）。",
-            next_command="manage feishu-app --app-id <APP_ID>",
-            create_app_guide=guide,
-        )
-        return state, "select_feishu_app"
-    if not state["profile"]:
-        state.update(
-            next_question="确认将该应用导入技能的私有配置？",
-            next_command="manage feishu-local-profile import --yes",
-        )
-        return state, "reuse_or_configure_private_lark_profile"
-    state["profile_secret_ready"] = secret_state["ready"]
-    if facts["bot_secret_missing"]:
-        # The bot chain has no OAuth step that would surface this gap later:
-        # without an App Secret every API call dead-ends, so collect it here
-        # (local check only; no network, no device-auth request).
-        state.update(
-            next_question=(
-                "bot 身份需要应用的 App Secret 才能调用飞书 API：Agent 会创建并打开"
-                "一个本地密钥文件，把开放平台应用『凭证与基础信息』里的 App Secret "
-                "粘贴进去保存即可（不经过聊天，也不需要运行命令）。"
-            ),
-            next_command=_secret_file_command(),
-            create_app_guide=guide,
-        )
-        return state, "provide_app_secret_for_private_profile"
-    if facts["bot_manager_missing"]:
-        known_user = ""
-        try:
-            known_user = authorized_user_open_id()
-        except Exception:
-            known_user = ""
-        state.update(
-            next_question=(
-                "bot 身份不需要扫码授权。需要一位接收管理权限的飞书用户："
-                + (
-                    f"检测到曾授权的用户（{known_user[:12]}…），可直接采用。"
-                    if known_user
-                    else "请提供接收人的飞书 Open ID（个人版可在开放平台应用的『用户 ID 查询』工具获取）。"
-                )
-            ),
-            next_command=(
-                "manage feishu-manager --from-authorized-user"
-                if known_user
-                else "manage feishu-manager --open-id <OPEN_ID>"
-            ),
-        )
-        return state, "resolve_and_save_feishu_manager"
-    if facts["feishu_identity"] == "user" and facts["authorization_state"] == "waiting":
-        state.update(
-            next_question="上一次扫码授权还在等待确认：请完成页面确认；过期就重新发起。",
-            next_command="manage feishu-auth start（完成后 feishu-auth complete）",
-        )
-        return state, "resume_existing_user_base_authorization"
-    if facts["feishu_identity"] == "user" and facts["authorization_state"] != "authorized":
-        state.update(
-            next_question=(
-                "应用已绑定但密钥/授权未就绪：Agent 会创建并打开一个本地密钥文件，"
-                "把『凭证与基础信息』里的 App Secret 粘贴进去保存（不经过聊天）；"
-                "随后完成一次扫码授权。"
-            ),
-            next_command=_secret_file_command(),
-            then="manage feishu-auth start（扫码后 feishu-auth complete）",
-            create_app_guide=guide,
-        )
-        return state, "provide_app_secret_for_private_profile"
-    if state["destination"] == "undecided":
-        state.update(
-            next_question=(
-                "文章写入飞书的哪里？① 跳过 ② 写入已有表格（把表格链接发我即可，"
-                "会先只读校验字段）③ 新建标准表格（字段清单见 next_command_field_list，"
-                "确认后创建；bot 身份创建并授予你管理权限，全程免扫码）"
-            ),
-            next_command="manage feishu-destination --mode skip|existing|create",
-            next_command_existing="manage feishu-target --url <表格链接>",
-            next_command_field_list=[
-                spec["name"] for spec in standard_field_schema()
-            ],
-        )
-        return state, "ask_user_for_feishu_destination"
-    if state["destination"] == "create" and not state["target_configured"]:
-        state.update(
-            next_question=(
-                "将创建标准文章表，字段：" + "、".join(spec["name"] for spec in standard_field_schema())
-                + ("；bot 身份创建后会把管理权限授予你（免扫码）。确认字段与名称后继续。"
-                   if feishu["identity"] == "bot" else "；需要一次扫码授权（最小权限）。")
-            ),
-            next_command=(
-                "manage execution-policy set --mode autopilot --feishu-provisioning allow "
-                "--base-name <名称> --table-name <表名> --feishu-sync allow --yes → "
-                "manage feishu-create-base --name <名称> --table-name <表名>"
-                "（策略同名精确匹配即自动授权，无需 --yes；"
-                + (
-                    "bot 身份会自动把管理权限授予已配置的管理员，无需再执行 grant-manager）"
-                    if feishu["identity"] == "bot"
-                    else "切勿自行加 --yes 绕过已固化的策略）"
-                )
-            ),
-        )
-        return state, "provision_configured_feishu_base"
-    if not state["target_configured"] and state["destination"] == "existing":
-        state.update(
-            next_question="请提供目标表格的链接（先只读校验字段，再保存映射）。",
-            next_command="manage feishu-target --url <表格链接>",
-        )
-        return state, "configure_existing_feishu_target"
-    state.update(
-        next_question=None,
-        next_command="manage doctor --online（最终校验）",
+    return setup_status(
+        config,
+        secret_state=secret_state,
+        secret_command=_secret_file_command(),
+        field_names=[spec["name"] for spec in standard_field_schema()],
+        authorized_user=authorized_user_open_id,
     )
-    return state, "run_feishu_validation"
 
 
 def _secret_file_path() -> Path:
@@ -764,7 +435,7 @@ def _read_secret_file(value: Path) -> str:
 
 def _store_app_secret(app_id: str, secret: str) -> dict[str, Any]:
     try:
-        _run_lark(
+        run_lark(
             ["config", "init", "--app-id", app_id, "--app-secret-stdin"],
             retries=1,
             input_text=secret,
@@ -1062,27 +733,15 @@ def feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], s
 
     # Persist the recovery anchor before any external permission/schema step,
     # so a later failure can resume from this exact state.
-    def mutate_created(config: dict[str, Any]) -> dict[str, Any]:
-        config["feishu"].update(
-            {
-                "enabled": False,
-                "base_token": base_token,
-                "table_id": table_id,
-                "provisioning": "created",
-                "field_mapping": {},
-                "created_base_name": str(
-                    config["feishu"].get("created_base_name") or ""
-                ).strip()
-                or base_name,
-                "created_table_name": str(
-                    config["feishu"].get("created_table_name") or ""
-                ).strip()
-                or table_name,
-            }
-        )
-        return config
-
-    config = modify_config(mutate_created)
+    config = transition(
+        "feishu_provision_anchor",
+        {
+            "base_token": base_token,
+            "table_id": table_id,
+            "base_name": base_name,
+            "table_name": table_name,
+        },
+    )["config"]
     manager_granted = identity != "bot"
     if identity == "bot":
         try:
@@ -1096,19 +755,9 @@ def feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], s
 
     check = preflight_feishu(config["feishu"], allow_disabled=True)
 
-    def mutate_complete(config: dict[str, Any]) -> dict[str, Any]:
-        config["feishu"].update(
-            {
-                "enabled": True,
-                "field_mapping": check["mapping"],
-            }
-        )
-        config["setup"]["execution_policy"]["allow_feishu_provisioning"] = False
-        config["setup"]["execution_policy"]["provision_base_name"] = ""
-        config["setup"]["execution_policy"]["provision_table_name"] = ""
-        return config
-
-    config = modify_config(mutate_complete)
+    config = transition(
+        "feishu_provision_complete", {"field_mapping": check["mapping"]}
+    )["config"]
     update_health("feishu", success=True)
     return {
         "created": True,
@@ -1124,7 +773,7 @@ def feishu_create_base(arguments: argparse.Namespace) -> tuple[dict[str, Any], s
 
 def authorized_user_open_id() -> str:
     """Read the authorized user's Open ID from the isolated lark-cli state."""
-    payload = _run_lark(["auth", "status", "--json"], retries=1)
+    payload = run_lark(["auth", "status", "--json"], retries=1)
     auth = payload.get("data", payload) if isinstance(payload, dict) else {}
     identities = auth.get("identities", {}) if isinstance(auth, dict) else {}
     user = identities.get("user", {}) if isinstance(identities, dict) else {}
@@ -1132,25 +781,7 @@ def authorized_user_open_id() -> str:
 
 
 def feishu_manager(open_id: str) -> dict[str, Any]:
-    normalized = open_id.strip()
-    if not normalized.startswith("ou_"):
-        raise ValueError("manager Open ID must start with ou_")
-
-    def mutate(config: dict[str, Any]) -> dict[str, Any]:
-        if not config["setup"]["feishu_identity_confirmed"] or config["feishu"]["identity"] != "bot":
-            raise ValueError("select and confirm bot identity before setting its human manager")
-        previous = str(config["feishu"].get("manager_open_id") or "")
-        config["feishu"]["manager_open_id"] = normalized
-        if previous != normalized:
-            invalidate_policy(config)
-        return config
-
-    modify_config(mutate)
-    return {
-        "manager_configured": True,
-        "manager_open_id_included": False,
-        "permission_for_new_bot_resources": "full_access",
-    }
+    return set_manager(open_id)
 
 
 def _identity_ready(context: dict[str, Any], identity: str) -> bool:
@@ -1169,23 +800,7 @@ def _save_authorization_state(
     started: bool = False,
     completed: bool = False,
 ) -> dict[str, Any]:
-    now = datetime.now(timezone.utc).isoformat()
-
-    def mutate(config: dict[str, Any]) -> dict[str, Any]:
-        authorization = _authorization(config)
-        authorization["state"] = state
-        authorization["identity"] = config["feishu"]["identity"]
-        authorization["updated_at"] = now
-        if started:
-            authorization["started_at"] = now
-        if completed:
-            authorization["completed_at"] = now
-        if state in {"waiting", "expired", "failed", "not_started"}:
-            authorization["completed_at"] = ""
-        return config
-
-    config = modify_config(mutate)
-    return dict(_authorization(config))
+    return save_authorization_state(state, started=started, completed=completed)
 
 
 def feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -10,12 +9,11 @@ import re
 import shutil
 import subprocess
 import time
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import lark_profile_store
 from paths import config_path, data_dir, secure_write_json
-
 
 IDENTITY_ENV_KEYS = {
     "LARKSUITE_CLI_APP_ID",
@@ -23,8 +21,8 @@ IDENTITY_ENV_KEYS = {
     "LARKSUITE_CLI_USER_ACCESS_TOKEN",
     "LARKSUITE_CLI_TENANT_ACCESS_TOKEN",
 }
-MAX_LARK_CONFIG_BYTES = 1024 * 1024
-MAX_LARK_PROFILES = 100
+MAX_LARK_CONFIG_BYTES = lark_profile_store.MAX_CONFIG_BYTES
+MAX_LARK_PROFILES = lark_profile_store.MAX_PROFILES
 
 
 def lark_cli_install_dir() -> Path:
@@ -141,11 +139,8 @@ def _runtime_binding() -> dict[str, str]:
 
 
 def profile_name_for_app(app_id: str) -> str:
-    normalized = app_id.strip()
-    if not normalized:
-        raise ValueError("Feishu App ID is required")
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
-    return f"wechat-article-{digest}"
+    """Compatibility adapter for the profile migration module."""
+    return lark_profile_store.profile_name_for_app(app_id)
 
 
 def safe_lark_arguments(arguments: list[str]) -> list[str]:
@@ -206,9 +201,17 @@ def safe_lark_arguments(arguments: list[str]) -> list[str]:
     if command == "config" and subcommand == "bind":
         if binding["binding_mode"] != "agent":
             raise ValueError("config bind is allowed only for a confirmed Agent binding")
+        if len(args) != 8 or any(
+            args.count(flag) != 1 for flag in ("--source", "--app-id", "--identity")
+        ):
+            raise ValueError(
+                "config bind accepts only the confirmed source, App ID, and "
+                "user-default identity"
+            )
         for flag, expected in (
             ("--source", binding["agent_source"]),
             ("--app-id", binding["app_id"]),
+            ("--identity", "user-default"),
         ):
             if not expected:
                 raise ValueError(f"config bind requires a confirmed {flag} value")
@@ -223,84 +226,85 @@ def safe_lark_arguments(arguments: list[str]) -> list[str]:
     return args
 
 
+def safe_agent_lark_arguments(arguments: list[str]) -> list[str]:
+    """Allow only the small non-mutating/auth-resume surface exposed to Agents."""
+    args = list(arguments)
+    allowed = args == ["--version"] or args == ["profile", "list"]
+    allowed = allowed or (
+        args[:2] == ["auth", "status"]
+        and len(args) == len(set(args))
+        and all(value in {"auth", "status", "--json", "--verify"} for value in args)
+    )
+    allowed = allowed or args == [
+        "auth",
+        "login",
+        "--domain",
+        "base",
+        "--no-wait",
+        "--json",
+    ]
+    allowed = allowed or args == ["auth", "login", "--help"]
+    # The shared validator below binds this exact operation to the host source
+    # and App ID already saved from trusted conversation context.
+    allowed = allowed or args[:2] == ["config", "bind"]
+    allowed = allowed or (
+        len(args) in {4, 5}
+        and args[:3] == ["auth", "login", "--device-code"]
+        and bool(re.fullmatch(r"[A-Za-z0-9._~-]{1,256}", args[3]))
+        and (len(args) == 4 or args[4] == "--json")
+    )
+    qr_url = args[2] if len(args) >= 3 else ""
+    qr_path = Path(args[4]) if len(args) >= 5 and args[3] == "--output" else None
+    qr_output = bool(
+        len(args) in {5, 7}
+        and args[:2] == ["auth", "qrcode"]
+        and re.fullmatch(r"https://\S{1,2048}", qr_url)
+        and qr_path is not None
+        and not qr_path.is_absolute()
+        and ".." not in qr_path.parts
+        and not str(qr_path).startswith("-")
+        and (
+            len(args) == 5
+            or (
+                args[5] == "--size"
+                and args[6].isdigit()
+                and 128 <= int(args[6]) <= 2048
+            )
+        )
+    )
+    qr_ascii = bool(
+        args[:2] == ["auth", "qrcode"]
+        and len(args) == 4
+        and re.fullmatch(r"https://\S{1,2048}", qr_url)
+        and args[3] == "--ascii"
+    )
+    allowed = allowed or qr_output or qr_ascii or args == ["auth", "qrcode", "--help"]
+    if not allowed:
+        raise ValueError(
+            "this lark command is outside the Agent-facing allowlist; use a "
+            "purpose-built manage/process command so authorization is enforced"
+        )
+    return safe_lark_arguments(args)
+
+
 def global_lark_config_path() -> Path:
-    return (Path.home() / ".lark-cli" / "config.json").resolve()
+    return lark_profile_store.config_path()
 
 
 def global_lark_config_fingerprint() -> tuple[bool, int, int, str]:
-    path = global_lark_config_path()
-    try:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            while chunk := handle.read(64 * 1024):
-                digest.update(chunk)
-        stat = path.stat()
-    except OSError:
-        return (False, 0, 0, "")
-    return (
-        True,
-        stat.st_size,
-        stat.st_mtime_ns,
-        digest.hexdigest(),
-    )
+    return lark_profile_store.fingerprint(global_lark_config_path())
 
 
 def _read_lark_config(path: Path) -> dict[str, Any]:
-    """Read one bounded lark-cli config without returning secret values."""
-    try:
-        stat = path.stat()
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(f"lark-cli configuration was not found at {path}") from exc
-    if not path.is_file():
-        raise ValueError(f"lark-cli configuration is not a regular file: {path}")
-    if stat.st_size > MAX_LARK_CONFIG_BYTES:
-        raise ValueError(
-            f"lark-cli configuration exceeds the {MAX_LARK_CONFIG_BYTES}-byte safety limit"
-        )
-    try:
-        with path.open("rb") as handle:
-            data = handle.read(MAX_LARK_CONFIG_BYTES + 1)
-        if len(data) > MAX_LARK_CONFIG_BYTES:
-            raise ValueError(
-                f"lark-cli configuration exceeds the {MAX_LARK_CONFIG_BYTES}-byte "
-                "safety limit"
-            )
-        payload = json.loads(data.decode("utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(
-            f"cannot read lark-cli configuration metadata: {type(exc).__name__}"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise ValueError("lark-cli configuration root must be an object")
-    apps = payload.get("apps")
-    if not isinstance(apps, list):
-        raise ValueError("lark-cli configuration must contain an apps list")
-    if len(apps) > MAX_LARK_PROFILES:
-        raise ValueError(
-            f"lark-cli configuration contains more than {MAX_LARK_PROFILES} profiles"
-        )
-    if not all(isinstance(item, dict) for item in apps):
-        raise ValueError("every lark-cli profile must be an object")
-    return payload
+    return lark_profile_store.read_config(path)
 
 
 def _secret_storage(profile: dict[str, Any]) -> str:
-    secret = profile.get("appSecret")
-    if isinstance(secret, str):
-        return "inline" if secret else "missing"
-    if isinstance(secret, dict):
-        source = str(secret.get("source") or "").strip().casefold()
-        identifier = str(secret.get("id") or "").strip()
-        if not source or not identifier:
-            return "missing"
-        return source if source == "keychain" else "unsupported"
-    return "missing"
+    return lark_profile_store.secret_storage(profile)
 
 
 def _metadata_text(value: Any, limit: int = 128) -> str:
-    """Bound untrusted profile labels before returning them to an Agent."""
-    text = str(value or "").strip()
-    return "".join(character for character in text if ord(character) >= 32)[:limit]
+    return lark_profile_store.metadata_text(value, limit)
 
 
 def discover_global_lark_profiles() -> dict[str, Any]:
@@ -310,47 +314,10 @@ def discover_global_lark_profiles() -> dict[str, Any]:
     identifier, access token, or user Open ID.
     """
     path = global_lark_config_path()
-    before = global_lark_config_fingerprint()
-    if not before[0]:
-        return {
-            "exists": False,
-            "path": str(path),
-            "profile_count": 0,
-            "profiles": [],
-            "secrets_included": False,
-            "config_unchanged": True,
-        }
-    payload = _read_lark_config(path)
-    profiles: list[dict[str, Any]] = []
-    for item in payload["apps"]:
-        users = item.get("users")
-        storage = _secret_storage(item)
-        profiles.append(
-            {
-                "name": _metadata_text(item.get("name")),
-                "app_id": _metadata_text(item.get("appId")),
-                "brand": _metadata_text(item.get("brand"), 32),
-                "default_as": _metadata_text(item.get("defaultAs"), 32),
-                "strict_mode": _metadata_text(item.get("strictMode"), 32),
-                "app_secret_available": storage in {"inline", "keychain"},
-                "app_secret_storage": storage,
-                "authorized_user_count": len(users) if isinstance(users, list) else 0,
-            }
-        )
-    after = global_lark_config_fingerprint()
-    if after != before:
-        raise RuntimeError(
-            "the user's lark-cli configuration changed while it was being inspected; "
-            "retry after other lark-cli activity finishes"
-        )
-    return {
-        "exists": True,
-        "path": str(path),
-        "profile_count": len(profiles),
-        "profiles": profiles,
-        "secrets_included": False,
-        "config_unchanged": True,
-    }
+    return lark_profile_store.discover(
+        path,
+        fingerprint_fn=global_lark_config_fingerprint,
+    )
 
 
 def private_profile_secret_state() -> dict[str, Any]:
@@ -361,28 +328,10 @@ def private_profile_secret_state() -> dict[str, Any]:
     before manager/target steps can suggest commands that would dead-end on a
     profile without credentials.
     """
-    binding = _runtime_binding()
-    profile = binding["profile"]
-    result: dict[str, Any] = {
-        "bound": bool(profile),
-        "profile": profile,
-        "app_secret_storage": "missing" if profile else "unbound",
-        "ready": False,
-    }
-    if not profile:
-        return result
-    try:
-        payload = _read_lark_config(lark_cli_config_dir() / "config.json")
-    except (FileNotFoundError, ValueError, OSError):
-        return result
-    for item in payload["apps"]:
-        if str(item.get("name") or "").strip() != profile:
-            continue
-        storage = _secret_storage(item)
-        result["app_secret_storage"] = storage
-        result["ready"] = storage in {"inline", "keychain"}
-        break
-    return result
+    return lark_profile_store.private_secret_state(
+        _runtime_binding(),
+        lark_cli_config_dir(),
+    )
 
 
 def import_global_lark_profile(expected_app_id: str, target_profile: str) -> dict[str, Any]:
@@ -392,124 +341,14 @@ def import_global_lark_profile(expected_app_id: str, target_profile: str) -> dic
     can mutate shared keychain state. User identity must authorize once inside the
     isolated profile; bot identity can immediately reuse the copied App credential.
     """
-    app_id = expected_app_id.strip()
-    profile_name = target_profile.strip()
-    app_id_suffix = app_id[4:] if app_id.startswith("cli_") else ""
-    if (
-        not app_id_suffix
-        or not app_id_suffix.isascii()
-        or not app_id_suffix.isalnum()
-    ):
-        raise ValueError(
-            "the selected Feishu App ID must start with cli_ and contain only "
-            "ASCII letters/digits"
-        )
-    if (
-        not profile_name
-        or len(profile_name) > 128
-        or any(ord(character) < 32 for character in profile_name)
-    ):
-        raise ValueError("the isolated lark-cli profile name is invalid")
-
-    source_path = global_lark_config_path()
-    source_before = global_lark_config_fingerprint()
-    source = _read_lark_config(source_path)
-    matches = [
-        item
-        for item in source["apps"]
-        if str(item.get("appId") or "").strip() == app_id
-    ]
-    if not matches:
-        raise ValueError(
-            f"no existing local lark-cli profile matches the selected App ID {app_id}"
-        )
-    if len(matches) > 1:
-        raise ValueError(
-            f"multiple existing local lark-cli profiles match App ID {app_id}; "
-            "resolve the duplicate before importing"
-        )
-    selected = matches[0]
-    storage = _secret_storage(selected)
-    if storage not in {"inline", "keychain"}:
-        raise ValueError(
-            "the selected local profile does not expose a reusable inline/keychain "
-            "App credential; configure the isolated profile through secret stdin"
-        )
-    if global_lark_config_fingerprint() != source_before:
-        raise RuntimeError(
-            "the user's lark-cli configuration changed during import inspection; retry"
-        )
-
-    private_path = lark_cli_config_dir() / "config.json"
-    if private_path.exists():
-        private = _read_lark_config(private_path)
-    else:
-        private = {"apps": []}
-    private_apps = private["apps"]
-    named = [
-        item
-        for item in private_apps
-        if str(item.get("name") or "").strip() == profile_name
-    ]
-    if named:
-        if (
-            len(named) == 1
-            and str(named[0].get("appId") or "").strip() == app_id
-            and _secret_storage(named[0]) != "missing"
-        ):
-            return {
-                "imported": False,
-                "already_configured": True,
-                "app_id": app_id,
-                "private_profile": profile_name,
-                "source_config_unchanged": global_lark_config_fingerprint()
-                == source_before,
-                "user_tokens_imported": False,
-                "secrets_included": False,
-            }
-        raise ValueError(
-            f"isolated lark-cli profile name {profile_name!r} is already in use"
-        )
-    duplicates = [
-        item
-        for item in private_apps
-        if str(item.get("appId") or "").strip() == app_id
-    ]
-    if duplicates:
-        raise ValueError(
-            f"the selected App ID {app_id} already exists under another isolated "
-            "profile; refusing to create an ambiguous duplicate"
-        )
-
-    imported = {
-        key: deepcopy(selected[key])
-        for key in ("appId", "appSecret", "brand", "lang", "defaultAs", "strictMode")
-        if key in selected
-    }
-    imported.update({"name": profile_name, "users": []})
-    private_apps.append(imported)
-    if global_lark_config_fingerprint() != source_before:
-        raise RuntimeError(
-            "the user's lark-cli configuration changed before the isolated copy was "
-            "written; retry"
-        )
-    secure_write_json(private_path, private)
-    source_unchanged = global_lark_config_fingerprint() == source_before
-    if not source_unchanged:
-        raise RuntimeError(
-            "the user's lark-cli configuration changed concurrently; inspect both "
-            "configurations before continuing"
-        )
-    return {
-        "imported": True,
-        "already_configured": False,
-        "app_id": app_id,
-        "private_profile": profile_name,
-        "app_secret_storage": storage,
-        "source_config_unchanged": True,
-        "user_tokens_imported": False,
-        "secrets_included": False,
-    }
+    return lark_profile_store.import_profile(
+        expected_app_id,
+        target_profile,
+        source_path=global_lark_config_path(),
+        private_dir=lark_cli_config_dir(),
+        fingerprint_fn=global_lark_config_fingerprint,
+        secure_write=secure_write_json,
+    )
 
 
 def lark_cli_environment() -> dict[str, str]:
@@ -568,25 +407,50 @@ def _lark_cli() -> str:
         ) from exc
 
 
+def _execute_lark(
+    args: list[str],
+    *,
+    input_text: str | None = None,
+    capture_output: bool = True,
+    timeout: int = 60,
+) -> tuple[subprocess.CompletedProcess[str], bool]:
+    """Execute every lark-cli policy through the same isolated process boundary."""
+    lark_cli_home_dir().mkdir(parents=True, exist_ok=True)
+    lark_cli_config_dir().mkdir(parents=True, exist_ok=True)
+    work_dir = lark_cli_work_dir()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    global_before = global_lark_config_fingerprint()
+    result = subprocess.run(
+        [_lark_cli(), *args],
+        input=input_text,
+        capture_output=capture_output,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+        env=lark_cli_environment(),
+        cwd=work_dir,
+    )
+    return result, global_lark_config_fingerprint() == global_before
+
+
 def lark_cli_info() -> dict[str, Any]:
     """Return a redacted compatibility report for the installed lark-cli."""
-    executable = _lark_cli()
     try:
-        result = subprocess.run(
-            [executable, "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=15,
-            env=lark_cli_environment(),
-        )
+        result, global_unchanged = _execute_lark(["--version"], timeout=15)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise LarkCLIError(
             f"cannot run lark-cli version check: {type(exc).__name__}",
             kind="version",
         ) from exc
+    if not global_unchanged:
+        raise LarkCLIError(
+            "the user's global ~/.lark-cli/config.json changed during an isolated "
+            "Skill command; stop and inspect the CLI installation",
+            kind="config",
+        )
+    executable = _lark_cli()
     output = (result.stdout or result.stderr).strip()[:200]
     match = re.search(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)", output)
     if result.returncode != 0 or not match:
@@ -709,8 +573,9 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
         # dialogue can recover instead of dead-ending.
         return LarkCLIError(
             "the isolated lark-cli profile has no usable credentials for the bound "
-            "App ID; provide the App Secret with `printf %s '<APP_SECRET>' | manage "
-            "feishu-app-secret` (bot identity needs no OAuth) and retry",
+            "App ID; run `manage feishu-app-secret --prepare-secret-file`, then "
+            "`--open-secret-file`, enter the secret locally and consume it with "
+            "`manage feishu-app-secret --secret-file <PATH>` (bot identity needs no OAuth) and retry",
             kind="config",
             code=code,
         )
@@ -789,7 +654,7 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
     )
 
 
-def _run_lark(
+def run_lark(
     args: list[str], *, retries: int = 3, input_text: str | None = None
 ) -> dict[str, Any] | list[Any]:
     # input_text is forwarded to the child's stdin; used exclusively for
@@ -798,28 +663,11 @@ def _run_lark(
         safe_args = safe_lark_arguments(args)
     except ValueError as exc:
         raise LarkCLIError(str(exc), kind="config") from exc
-    command = [_lark_cli(), *safe_args]
-    lark_cli_home_dir().mkdir(parents=True, exist_ok=True)
-    lark_cli_config_dir().mkdir(parents=True, exist_ok=True)
-    work_dir = lark_cli_work_dir()
-    work_dir.mkdir(parents=True, exist_ok=True)
-    global_before = global_lark_config_fingerprint()
     last_error: LarkCLIError | None = None
     for attempt in range(max(1, retries)):
         try:
-            result = subprocess.run(
-                command,
-                input=input_text,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60,
-                check=False,
-                env=lark_cli_environment(),
-                cwd=work_dir,
-            )
-            if global_lark_config_fingerprint() != global_before:
+            result, global_unchanged = _execute_lark(safe_args, input_text=input_text)
+            if not global_unchanged:
                 raise LarkCLIError(
                     "the user's global ~/.lark-cli/config.json changed during an "
                     "isolated Skill command; stop and inspect the CLI installation",
@@ -859,6 +707,18 @@ def _run_lark(
         time.sleep(2**attempt)
     assert last_error is not None
     raise last_error
+
+
+def run_agent_lark(arguments: list[str]) -> tuple[int, bool, str, str]:
+    """Run the restricted Agent-facing CLI with isolated, redacted output."""
+    safe_args = safe_agent_lark_arguments(arguments)
+    result, global_unchanged = _execute_lark(safe_args)
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    if result.returncode:
+        stdout = _redact_cli_error(stdout, safe_args)
+        stderr = _redact_cli_error(stderr, safe_args)
+    return result.returncode, global_unchanged, stdout, stderr
 
 
 def _append_secret_hint(message: str) -> str:

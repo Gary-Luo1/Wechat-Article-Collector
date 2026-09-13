@@ -10,9 +10,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from lark_runtime import LarkCLIError, _run_lark, lark_cli_work_dir
+from lark_runtime import LarkCLIError, lark_cli_work_dir, run_lark
 from url_identity import upgrade_wechat_article_url
-
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +146,7 @@ def probe_app_secret_resolution() -> dict[str, Any]:
     by a call that uses the secret.
     """
     try:
-        _run_lark(["auth", "login", "--domain", "base", "--no-wait", "--json"], retries=1)
+        run_lark(["auth", "login", "--domain", "base", "--no-wait", "--json"], retries=1)
     except LarkCLIError as exc:
         message = str(exc)
         if "client_secret" in message:
@@ -210,7 +209,7 @@ def list_fields(
     base_token: str, table_id: str, *, identity: str = "user"
 ) -> list[dict[str, Any]]:
     return _items(
-        _run_lark(
+        run_lark(
             [
                 "base",
                 "+field-list",
@@ -464,7 +463,7 @@ def find_record_by_url(
     identity: str = "user",
 ) -> str | None:
     filter_json = {"logic": "and", "conditions": [[url_field, "==", url]]}
-    payload = _run_lark(
+    payload = run_lark(
         [
             "base",
             "+record-list",
@@ -537,7 +536,7 @@ def resolve_lark_profile(expected_app_id: str) -> dict[str, Any]:
             "the lark-cli default profile",
             kind="wrong_app",
         )
-    profiles = _profile_items(_run_lark(["profile", "list"], retries=1))
+    profiles = _profile_items(run_lark(["profile", "list"], retries=1))
     matches = [
         profile
         for profile in profiles
@@ -590,14 +589,14 @@ def resolve_lark_profile(expected_app_id: str) -> dict[str, Any]:
 
 def feishu_identity_context(*, verify: bool = False) -> dict[str, Any]:
     """Return a redacted, stable identity snapshot for dialogue setup."""
-    configured_payload = _run_lark(["config", "show"], retries=1)
+    configured_payload = run_lark(["config", "show"], retries=1)
     if not isinstance(configured_payload, dict):
         raise LarkCLIError("lark-cli config show returned an invalid payload", kind="command")
     configured = _payload_data(configured_payload)
     auth_args = ["auth", "status", "--json"]
     if verify:
         auth_args.append("--verify")
-    auth_payload = _run_lark(auth_args, retries=1)
+    auth_payload = run_lark(auth_args, retries=1)
     if not isinstance(auth_payload, dict):
         raise LarkCLIError("lark-cli auth status returned an invalid payload", kind="command")
     auth = _payload_data(auth_payload)
@@ -660,7 +659,7 @@ def verify_feishu_identity(
                 "pin the exact profile before continuing.",
                 kind="wrong_app",
             )
-    auth = _run_lark(["auth", "status", "--json", "--verify"], retries=1)
+    auth = run_lark(["auth", "status", "--json", "--verify"], retries=1)
     if not isinstance(auth, dict):
         raise LarkCLIError("lark-cli auth status returned an invalid payload", kind="command")
     auth_data = auth.get("data", auth)
@@ -746,7 +745,7 @@ def grant_bot_created_resource(
         )
     if not member.startswith("ou_"):
         raise ValueError("manager_open_id must be a confirmed Feishu open_id starting with ou_")
-    return _run_lark(
+    return run_lark(
         [
             "drive",
             "+member-add",
@@ -815,7 +814,7 @@ def create_standard_base(
     try:
         if dry_run:
             arguments.append("--dry-run")
-        return _run_lark(arguments, retries=1)
+        return run_lark(arguments, retries=1)
     finally:
         fields_path.unlink(missing_ok=True)
 
@@ -944,7 +943,7 @@ def upsert_article(
         args.extend(["--record-id", record_id])
     if dry_run:
         args.append("--dry-run")
-    _run_lark(args)
+    run_lark(args)
     return {
         "updated": bool(record_id),
         "skipped_fields": skipped_fields,

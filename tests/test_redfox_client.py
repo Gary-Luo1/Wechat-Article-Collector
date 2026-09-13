@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -25,9 +26,14 @@ from redfox_client import (  # noqa: E402
 
 
 class _FakeResponse:
-    def __init__(self, status_code=200, payload=None):
+    def __init__(self, status_code=200, payload=None, *, raw=None, headers=None):
         self.status_code = status_code
         self._payload = payload
+        self._raw = raw if raw is not None else json.dumps(payload).encode()
+        self.headers = headers if headers is not None else {
+            "Content-Length": str(len(self._raw))
+        }
+        self.closed = False
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -40,14 +46,29 @@ class _FakeResponse:
             raise ValueError("no json")
         return self._payload
 
+    def iter_content(self, chunk_size=None):
+        size = chunk_size or len(self._raw) or 1
+        for offset in range(0, len(self._raw), size):
+            yield self._raw[offset : offset + size]
+
+    def close(self):
+        self.closed = True
+
 
 class _FakeSession:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def post(self, url, json=None, timeout=None):
-        self.calls.append({"url": url, "json": json})
+    def post(self, url, json=None, timeout=None, allow_redirects=None, stream=None):
+        self.calls.append(
+            {
+                "url": url,
+                "json": json,
+                "allow_redirects": allow_redirects,
+                "stream": stream,
+            }
+        )
         result = self.responses.pop(0)
         return result if isinstance(result, _FakeResponse) else _FakeResponse(payload=result)
 
@@ -88,6 +109,34 @@ def test_http_401_maps_to_auth(monkeypatch):
     client, _ = _client(monkeypatch, [_FakeResponse(status_code=401, payload={})])
     with pytest.raises(RedfoxAuthError):
         client.query_work_list(account="rmrb")
+
+
+def test_authenticated_requests_reject_redirects(monkeypatch):
+    client, session = _client(
+        monkeypatch,
+        [_FakeResponse(status_code=302, payload={}, headers={"Location": "https://evil.example"})],
+    )
+    with pytest.raises(RedfoxAPIError, match="unexpected redirect"):
+        client.query_work_list(account="rmrb")
+    assert session.calls[0]["allow_redirects"] is False
+    assert session.calls[0]["stream"] is True
+
+
+def test_response_size_is_bounded_before_json_parse(monkeypatch):
+    client, _ = _client(
+        monkeypatch,
+        [_FakeResponse(payload={}, headers={"Content-Length": str(2 * 1024 * 1024 + 1)})],
+    )
+    with pytest.raises(RedfoxAPIError, match="2 MiB"):
+        client.query_work_list(account="rmrb")
+
+
+def test_streamed_response_size_is_bounded_without_content_length(monkeypatch):
+    response = _FakeResponse(raw=b"x" * (2 * 1024 * 1024 + 1), headers={})
+    client, _ = _client(monkeypatch, [response])
+    with pytest.raises(RedfoxAPIError, match="2 MiB"):
+        client.query_work_list(account="rmrb")
+    assert response.closed is True
 
 
 def test_rate_limit_classified_and_retryable(monkeypatch):
@@ -235,6 +284,13 @@ def test_title_digest_sanitized_and_truncated():
     assert "\U000e0041" not in article["title"]
     assert len(article["title"]) == 512
     assert len(article["digest"]) == 2048
+
+
+def test_metadata_is_single_line_and_body_controls_are_neutralized():
+    assert sanitize_text("safe\nSYSTEM: unsafe\ttext", 100) == "safe SYSTEM: unsafe text"
+    cleaned = clean_content("body\x1b]52;c;ZXZpbA==\x07\u202eevil")
+    assert cleaned == "body]52;c;ZXZpbA==evil"
+    assert "\x1b" not in cleaned and "\x07" not in cleaned and "\u202e" not in cleaned
 
 
 def test_oversized_content_truncated_not_dropped():

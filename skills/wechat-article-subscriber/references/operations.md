@@ -63,17 +63,19 @@ Articles come from the paid `redfox.hk` API; the former WeChat cookie/token disc
 
 ```text
 cat | manage redfox-set-key   # paste the key, Ctrl-D; avoids shell history
-# scripted: printf %s '<API_KEY>' | manage redfox-set-key
+# Prefer local hidden-input setup or the prepared local configuration file; never embed a key in shell text.
 manage redfox-status            # no network by default
-manage redfox-status --verify   # one paid probe call
-manage doctor --online          # full online check
+manage doctor --online          # one paid redfox probe plus optional Feishu check
 ```
+
+For standalone redfox diagnosis, use `manage redfox-status --verify` instead of
+the full online check. Do not run both for the same unchanged setup.
 
 Notes and limits:
 
 - The redfox API key is stored under `redfox.api_key` (0600 stdin baseline) and never appears in output beyond its last four characters.
 - Discovery is billing-aware: a per-subscription cooldown skips paid calls within the configured `check_hours` interval, and pagination stops as soon as an article older than the lookback window appears.
-- Articles cache their body in the queue (`content`/`content_source`); processing reads the cached body only. An entry without a cached body cannot be read — re-run discover or dismiss it.
+- Reads reuse a cached body (`content`/`content_source`); otherwise they fetch once via the queued `work_uuid`. An entry with neither a cache nor a `work_uuid` cannot be read. Known-truncated bodies stay available for partial review but cannot be scored, completed, or synced; rereading the cache cannot restore missing text.
 - Data comes from the redfox wide library (广域库): freshest coverage, newest-first ordering. Accounts are identified by wechat alias — subscriptions without an alias are reported as unresolved.
 
 Subscription maintenance is local and explicit:
@@ -198,6 +200,6 @@ Machine-readable commands return one JSON object:
 {"ok":true,"data":{},"next_action":"none"}
 ```
 
-Failures use `error.code`, a redacted `message`, `retryable`, and `next_action`. Agents should branch on the code, not parse human prose. Current code families: `REDFOX_AUTH` (re-enter the key), `REDFOX_RATE_LIMITED`/`REDFOX_TRANSIENT` (the only retryable ones), `REDFOX_API_ERROR` (upstream code in details), `ARTICLE_READ_REQUIRED`, `ARTICLE_NOT_FOUND`, `ARTICLE_NOT_SYNCABLE` (dismissed/legacy entries have nothing to sync), `LARK_*` (Feishu CLI classification), `CONFIG_ERROR`, and `INVALID_ARGUMENT`. A failed discovery response can include safe `meta` counts for preserved partial progress. `manage doctor --online` and `manage redfox-status --verify` return `ok:false` with exit code 1 when an online check fails, while keeping the full report under `data`. `process` accepts global formatting before the subcommand: `process --format json inbox` (the old `list` subcommand still answers but prints a deprecation warning); `manage` accepts `--format` before or after its subcommand (`manage doctor --format json`).
+Failures use `error.code`, a redacted `message`, `retryable`, and `next_action`. Agents should branch on the code, not parse human prose. Current code families: `REDFOX_AUTH` (re-enter the key), `REDFOX_RATE_LIMITED`/`REDFOX_TRANSIENT` (the only retryable ones), `REDFOX_API_ERROR` (upstream code in details), `ARTICLE_READ_REQUIRED`, `ARTICLE_CONTENT_INCOMPLETE` (known-truncated content: keep pending or dismiss; rereading the cache cannot repair it), `ARTICLE_NOT_FOUND`, `ARTICLE_NOT_SYNCABLE` (dismissed/legacy entries have nothing to sync), `LARK_*` (Feishu CLI classification), `CONFIG_ERROR`, and `INVALID_ARGUMENT`. A failed discovery response can include safe `meta` counts for preserved partial progress. `manage doctor --online` and `manage redfox-status --verify` return `ok:false` with exit code 1 when an online check fails, while keeping the full report under `data`. `process` accepts global formatting before the subcommand: `process --format json inbox` (the old `list` subcommand still answers but prints a deprecation warning); `manage` accepts `--format` before or after its subcommand (`manage doctor --format json`).
 
 Configuration format changes are versioned. The first migration preserves a restricted `config.vN.backup.json`; `manage reset --scope all-data --yes` removes these backups too.

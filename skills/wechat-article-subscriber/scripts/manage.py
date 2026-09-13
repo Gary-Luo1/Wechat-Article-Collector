@@ -2,47 +2,40 @@
 """Inspect, patch, diagnose, and safely reset skill state."""
 
 from __future__ import annotations
+
 import argparse
-from copy import deepcopy
-from datetime import datetime, timezone
 import importlib.util
 import json
 import platform
 import shutil
 import sys
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from article_inbox import queue_summary
 
+from article_inbox import queue_summary
 from config_store import (
     DEFAULT_CONFIG,
-    save_config,
     ConfigError,
     load_config,
     modify_config,
     redacted_config,
+    save_config,
     update_health,
     validate_config,
 )
+from config_transitions import transition
 from execution_policy import (
+    autopilot_policy,
     next_stage,
     policy_for,
     stage_facts,
 )
-from lark_runtime import LarkCLIError, lark_cli_info
-
 from feishu_target import production_feishu_target
-from paths import config_path, data_dir, lock_path, queue_path, venv_dir
-from protocol import (
-    NEXT_ACTIONS,
-    _pipe_cmd,
-    _read_secret_stdin,
-    emit,
-    failure,
-    hoist_format_flag,
-    success,
-)
+from lark_runtime import LarkCLIError, lark_cli_info
 from manage_feishu import (
+    _secret_file_command,
     authorized_user_open_id,
     feishu_app,
     feishu_app_secret,
@@ -58,8 +51,16 @@ from manage_feishu import (
     feishu_target,
     import_feishu_host_context,
 )
-from manage_feishu import _secret_file_command
-
+from paths import config_path, data_dir, lock_path, queue_path, venv_dir
+from protocol import (
+    NEXT_ACTIONS,
+    _pipe_cmd,
+    _read_secret_stdin,
+    emit,
+    failure,
+    hoist_format_flag,
+    success,
+)
 
 STEP_LABELS = {
     "feishu_destination": "确认是否写入飞书多维表格",
@@ -89,9 +90,10 @@ ACTION_LABELS = {
     "inspect_failed_items": "检查失败条目",
     "process_pending_articles": "处理待读文章",
     "edit_then_validate_local_config": "编辑并校验本地配置文件",
-    "run_redfox_key_setup": "通过 stdin 设置 redfox API Key",
+    "run_redfox_key_setup": "通过本地配置文件或隐藏输入设置 redfox API Key",
     "confirm_daily_run": "确认以上计划后加 --yes 执行每日发现与简报",
-    "collect_redfox_key": "提供 redfox API Key（stdin 或对话内提供皆可）",
+    "execute_daily_run": "计划已由现有策略授权，加 --yes 执行，无需重复确认",
+    "collect_redfox_key": "先选择密钥输入方式：推荐本地配置文件或隐藏输入",
     "rerun_with_yes": "预览无误后加 --yes 执行",
     "run_feishu_validation": "运行飞书只读校验",
     "select_or_initialize_feishu_profile": "选择或初始化技能私有的 lark-cli 配置",
@@ -108,7 +110,7 @@ ACTION_LABELS = {
     "ask_user_for_search_window": "选择文章搜索时间范围",
     "ask_for_subscription_names": "添加至少一个公众号",
     "edit_subscriptions_add_alias": "为缺少微信号的订阅补充 alias（广域库仅认微信号）",
-    "ask_user_to_choose_chat_or_local_file": "选择在聊天中配置，或编辑本地配置文件",
+    "ask_user_to_choose_chat_or_local_file": "选择本地配置文件（推荐）或本地隐藏输入",
     "run_feishu_context_then_authorize_only_if_needed": "验证飞书上下文，仅在缺失时发起授权",
     "review_and_apply_subscription_batch": "检查批量订阅预览并确认写入",
     "review_and_confirm_execution_policy": "一次确认后续自动执行范围",
@@ -241,7 +243,7 @@ def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
             "venv": str(venv_dir()),
         },
         "transport": {
-            "recommended": "offer ordinary chat or direct local config-file editing",
+            "recommended": "prefer direct local config-file editing or local hidden-input setup",
             "stdin_supported": True,
             "one_time_inbox_supported": True,
             "command_line_secrets_supported": False,
@@ -435,11 +437,7 @@ def _execution_policy_command(
         return {"preview": preview, "saved": False}, "rerun_with_yes"
     proposed["approved_at"] = datetime.now(timezone.utc).isoformat()
 
-    def mutate(config: dict[str, Any]) -> dict[str, Any]:
-        config["setup"]["execution_policy"] = proposed
-        return config
-
-    modify_config(mutate)
+    transition("execution_policy", proposed)
     return {
         "saved": True,
         "policy": deepcopy(proposed),
@@ -449,8 +447,12 @@ def _execution_policy_command(
     }, "continue_setup_then_execute"
 
 
+def _daily_next_action(config: dict[str, Any]) -> str:
+    return "execute_daily_run" if autopilot_policy(config) else "confirm_daily_run"
+
+
 def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
-    """Preview the full daily plan for confirmation, then run it with --yes."""
+    """Preview without side effects; --yes executes within the approved scope."""
     from article_inbox import plan_digest
     from discover_only import _subscription_cooldown_active, discover_articles
 
@@ -493,7 +495,7 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         "note": "1 list call per subscription outside its cooldown, plus 1 detail call per article read",
     }
     if not arguments.yes:
-        return plan, "confirm_daily_run"
+        return plan, _daily_next_action(config)
 
     diagnostics: list[dict] = []
     queued = 0
@@ -560,16 +562,16 @@ def _next_step() -> tuple[dict[str, Any], str]:
             }, "repair_local_config_file"
         return {
             "stage": "fresh_install",
-            "question": "请提供 redfox API key（在 https://redfox.hk/ 控制台创建；也可自己执行 printf 管道命令以避免聊天留存）",
-            "command": _pipe_cmd("printf %s '<KEY>' | manage redfox-set-key"),
+            "question": "请先选择 redfox.hk 密钥输入方式：本地配置文件（推荐）或本地隐藏输入；先查看配置指南，不要在命令文本中填写密钥。",
+            "command": "setup --guide --format json",
             "paid": False,
         }, "collect_redfox_key"
 
     if not config["redfox"]["api_key"].strip():
         return {
             "stage": "redfox_key_missing",
-            "question": "redfox API key 缺失：请在 https://redfox.hk/ 控制台创建后提供。",
-            "command": _pipe_cmd("printf %s '<KEY>' | manage redfox-set-key"),
+            "question": "redfox.hk API key 缺失：请选择本地配置文件（推荐）或本地隐藏输入；已有输入方式选择则直接沿用。",
+            "command": "setup --guide --format json",
             "paid": False,
         }, "collect_redfox_key"
 
@@ -648,14 +650,20 @@ def _next_step() -> tuple[dict[str, Any], str]:
             "内置名单预览/应用免费；名称解析 1 次调用/个",
         )
     if stage in {"ready_wechat_only", "ready"}:
+        approved = autopilot_policy(config) is not None
+        next_action = _daily_next_action(config)
         return {
             "stage": stage,
             "question": None,
-            "command": "manage daily  （先预览，用户确认后 --yes 执行）",
+            "command": "manage daily",
+            "execution_instruction": (
+                "预览后按现有授权执行 manage daily --yes，无需重复确认"
+                if approved else "预览后取得本次授权，再执行 manage daily --yes"
+            ),
             "paid": True,
             "paid_note": "预览免费；执行按订阅数计费",
             "ready": True,
-        }, "confirm_daily_run"
+        }, next_action
     question, command, paid = questions.get(
         stage, (None, "manage status", False)
     )
@@ -1150,33 +1158,7 @@ def _reset(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             preview = _credentials_reset_preview(load_config())
         return {"preview": preview, "deleted": []}, "rerun_with_yes"
     if scope == "credentials":
-        def mutate_reset(config: dict[str, Any]) -> dict[str, Any]:
-            config["redfox"] = {"api_key": ""}
-            config["setup"]["feishu_identity_confirmed"] = False
-            config["setup"]["feishu_authorization"] = dict(
-                DEFAULT_CONFIG["setup"]["feishu_authorization"]
-            )
-            config["setup"]["execution_policy"] = deepcopy(
-                DEFAULT_CONFIG["setup"]["execution_policy"]
-            )
-            config["feishu"].update({
-                "destination": "undecided",
-                "enabled": False,
-                "binding_mode": "",
-                "agent_source": "",
-                "expected_app_id": "",
-                "cli_profile": "",
-                "expected_user_open_id": "",
-                "manager_open_id": "",
-                "base_token": "",
-                "table_id": "",
-                "field_mapping": {},
-                "provisioning": "",
-            })
-            config["health"] = validate_config(DEFAULT_CONFIG)["health"]
-            return config
-
-        modify_config(mutate_reset)
+        transition("credentials_reset")
         return {"cleared": "credentials", "preserved": ["subscriptions", "settings", "queue"]}, "ask_user_to_choose_chat_or_local_file"
     root = data_dir().resolve()
     for target in existing:
@@ -1475,12 +1457,7 @@ def main(argv: list[str] | None = None) -> int:
             if not arguments.yes:
                 data, next_action = {"preview": "disable Feishu sync; no Base data is deleted"}, "rerun_with_yes"
             else:
-                def mutate_disable(config: dict[str, Any]) -> dict[str, Any]:
-                    config["feishu"]["enabled"] = False
-                    config["setup"]["execution_policy"]["allow_feishu_sync"] = False
-                    return config
-
-                modify_config(mutate_disable)
+                transition("feishu_disable")
                 data = {"disabled": True, "base_data_deleted": False}
         else:
             # New parser commands must be wired explicitly; falling through to

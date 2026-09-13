@@ -3,7 +3,7 @@
 ## Supported environments
 
 - Python 3.9+
-- Network access to `mp.weixin.qq.com`
+- Network access to the fixed `redfox.hk` API endpoints; optional Feishu needs its configured CLI endpoints
 - A local Agent that supports Skills plus shell, filesystem, and network tools
 - Optional Feishu: Node.js 18+ and a compatible `@larksuite/cli`
 
@@ -46,10 +46,10 @@ remains the default for POSIX shells and Agents that can pipe raw bytes.
 
 ## Front-loaded configuration
 
-Collect configuration across one opening dialogue before routine work starts, but
-ask exactly one question per turn: present the wizard's current question alone,
-wait for the answer, apply it, and only then move to the next question — never
-batch several questions into one message or a multi-question form. Run
+Apply configuration values already supplied before asking questions. Use the
+wizard to identify only missing decisions; related non-secret questions may be
+grouped. Keep credential-channel consent and bounded execution authorization
+explicit, and never infer a Feishu destination from an omitted answer. Run
 `setup --guide --format json` and use its `configuration_manifest` as the
 coverage checklist. Determine:
 
@@ -87,12 +87,13 @@ Run `setup --guide --format json` and show the user the returned absolute
 that the file is plaintext JSON protected by the current OS account permissions;
 it is not encrypted and must not be committed, synced, uploaded, or shared.
 
-Let the user choose one route before collecting any values:
+Recommend local-file editing or hidden input. Reuse an existing choice; otherwise
+let the user choose one route before collecting credentials:
 
 1. Send the redfox API key in ordinary chat after acknowledging the platform
    retention risk. The Agent passes the assembled payload over stdin and never
-   echoes the value. Outside dialogue, `printf %s '<KEY>' | manage redfox-set-key`
-   reads the key from stdin directly.
+   echoes the value. Offer this route only if host rules permit it. Use an actual
+   process stdin API or the prepared one-time inbox; never embed the key in shell text.
 2. Edit the returned local configuration path directly using the minimal template,
    save it, and tell the Agent to continue. The Agent can first run
    `setup --prepare-local-file --format json` to create the parent directory and a
@@ -118,7 +119,7 @@ It does not encrypt, delete, or prevent retention of the original chat message.
 | Filesystem API but no stdin | `setup --prepare-agent-file`, write exact inbox, then `setup --agent-file` | Inbox is restricted and consumed once |
 | Neither safe channel | Local hidden-input `setup` | User enters secrets in terminal |
 
-Never put the redfox API key in command arguments, environment variables, repository files, arbitrary temporary files, logs, or responses. Before ordinary chat input, explain retention risk and obtain consent.
+Never put the redfox API key in command text (including printf scripts), command arguments, environment variables, repository files, arbitrary temporary files, logs, or responses. Before ordinary chat input, explain retention risk and obtain consent.
 
 The local-file lifecycle is:
 
@@ -138,16 +139,15 @@ credential values.
 ## redfox data source setup
 
 Start by running `setup --guide --format json`. Show the exact local file path and
-filling requirements, then ask the user to choose chat input, direct file editing,
-or the stdin command. Do not collect a credential before this choice.
+filling requirements, then recommend direct file editing or hidden-input setup.
+Apply the credential-channel rules above. Do not collect a credential before this choice.
 
 The only data-source credential is a redfox.hk API key:
 
 1. Register at `https://redfox.hk/` and create an API key in the console.
-2. Pipe it in: `printf %s '<KEY>' | manage redfox-set-key` (stdin only; the key
-   is never a command-line argument), or include `redfox_api_key` in the full
-   setup payload over the chosen safe channel.
-3. Verify once with `manage redfox-status --verify` (one paid probe call).
+2. Enter it in the prepared local configuration file or local hidden-input `setup`;
+   an Agent with a separate stdin channel may use the approved setup payload.
+3. Finish local configuration before the single online validation below.
 
 Then ask for subscribed accounts and a required search window:
 “每次希望搜索多久以内的文章？24 小时（推荐）、48 小时、7 天，还是自定义？”
@@ -191,10 +191,12 @@ manage execution-policy set --mode autopilot --feishu-provisioning deny --feishu
 manage execution-policy set --mode autopilot --feishu-provisioning deny --feishu-sync deny --yes
 ```
 
-Then validate online:
+Once the configuration and paid validation are authorized, validate online once
+(one paid redfox probe and optional Feishu preflight). Do not pair this command with
+`redfox-status --verify`, which is a standalone paid diagnostic. Reuse success
+while the relevant configuration is unchanged:
 
 ```text
-manage redfox-status --verify
 manage doctor --online
 ```
 

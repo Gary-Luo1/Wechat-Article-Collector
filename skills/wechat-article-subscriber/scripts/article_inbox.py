@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from queue_helpers import get_pending, read_queue
+from redfox_client import sanitize_text
 
 
 def _timestamp(item: dict[str, Any]) -> float:
@@ -174,6 +175,16 @@ def query_inbox(
     selected.sort(key=_timestamp, reverse=sort == "newest")
     matched = len(selected)
     selected = selected[:limit]
+    for item in selected:
+        article = item["article"]
+        article.pop("content", None)
+        article["title"] = sanitize_text(article.get("title", ""), 512)
+        article["account"] = sanitize_text(article.get("account", ""), 128)
+        article["digest"] = sanitize_text(article.get("digest", ""), 2048)
+        if "summary" in item:
+            item["summary"] = sanitize_text(item["summary"], 2048)
+        if "tags" in item:
+            item["tags"] = [sanitize_text(tag, 128) for tag in item["tags"]]
     return {
         "summary": {**_queue_summary(queue), "matched": matched, "returned": len(selected)},
         "filters": {
@@ -187,6 +198,7 @@ def query_inbox(
             "disposition": disposition,
         },
         "items": selected,
+        "trust_boundary": "untrusted_article_metadata",
     }
 
 
@@ -244,8 +256,8 @@ def plan_digest(
             (
                 (favorite, preferred_account, len(topic_matches), timestamp),
                 {
-                    "title": str(article.get("title", "")),
-                    "account": account,
+                    "title": sanitize_text(article.get("title", ""), 512),
+                    "account": sanitize_text(account, 128),
                     "link": str(article.get("link", "")),
                     "url": str(article.get("link", "")),
                     "published_at": article.get("update_time", 0),
@@ -267,6 +279,7 @@ def plan_digest(
         "returned": len(selected),
         "excluded": excluded,
         "candidates": selected,
+        "trust_boundary": "untrusted_article_metadata",
         "content_fetched": False,
         "articles_completed": False,
         "feishu_written": False,

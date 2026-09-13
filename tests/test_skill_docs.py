@@ -88,3 +88,23 @@ def test_description_is_multiline_with_paid_boundary_and_casual_triggers():
     # (digest-plan, discover, process export, subscriptions remove).
     for trigger in ("日报", "追更", "导出", "退订"):
         assert trigger in description, f"missing casual trigger phrase: {trigger}"
+
+
+def test_scoring_examples_match_calculator():
+    from scoring_rubric import SCORING_DIMENSIONS, calculate_score
+
+    text = (SKILL_DIR / "references" / "scoring.md").read_text(encoding="utf-8")
+    examples = re.findall(r"(\d+(?:/\d+){4}) → (\d+\.\d+)", text)
+    assert len(examples) == 3
+    for values, expected in examples:
+        scores = dict(zip(SCORING_DIMENSIONS, map(int, values.split("/"))))
+        assert calculate_score(scores) == float(expected)
+
+
+def test_setup_docs_do_not_embed_keys_or_require_duplicate_paid_probes():
+    for name, text in _doc_texts().items():
+        assert not re.search(r"printf[^\n]*<(?:API_KEY|KEY|APP_SECRET)>", text), name
+    setup = (SKILL_DIR / "references" / "setup.md").read_text(encoding="utf-8")
+    commands = "\n".join(re.findall(r"```text\n(.*?)```", setup, re.DOTALL))
+    assert commands.count("manage doctor --online") == 1
+    assert "redfox-status --verify" not in commands

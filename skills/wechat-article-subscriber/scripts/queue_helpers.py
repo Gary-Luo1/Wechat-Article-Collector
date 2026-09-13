@@ -178,6 +178,8 @@ def _validate_article(article: Any, location: str) -> None:
             raise ValueError(f"{location}.read_state.status must be verified")
         if not isinstance(read_state.get("verified_at"), str):
             raise ValueError(f"{location}.read_state.verified_at must be a string")
+        if not isinstance(read_state.get("content_truncated", False), bool):
+            raise ValueError(f"{location}.read_state.content_truncated must be boolean")
         fingerprint = read_state.get("content_sha256")
         if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
             raise ValueError(f"{location}.read_state.content_sha256 must be a SHA-256 hex digest")
@@ -271,6 +273,7 @@ def record_verified_read(
         "status": "verified",
         "verified_at": datetime.now(timezone.utc).isoformat(),
         "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "content_truncated": text.rstrip().endswith("\n[truncated]"),
     }
     with queue_lock():
         data = _read_unlocked()
@@ -339,11 +342,27 @@ def resolve_pending(*, index: int | None = None, link: str | None = None) -> dic
     return pending[index]
 
 
+def is_content_truncated(article: dict[str, Any]) -> bool:
+    """Recognize persisted truncation and cached bodies from older queues."""
+    state = article.get("read_state")
+    if isinstance(state, dict) and state.get("content_truncated"):
+        return True
+    # ponytail: legacy caches only have a suffix marker; treat literal matches
+    # conservatively as incomplete until the source provides structured coverage.
+    content = str(article.get("content") or "").rstrip()
+    return content.endswith("\n[truncated]")
+
+
 def has_verified_read(article: dict[str, Any]) -> bool:
-    """Return whether an article carries a validated full-text read proof."""
+    """Return whether fetched text has a read proof without known truncation.
+
+    This proves local delivery, not that the Agent consumed every output token
+    or that the upstream source supplied the publisher's entire article.
+    """
     state = article.get("read_state")
     return (
         isinstance(state, dict)
+        and not is_content_truncated(article)
         and state.get("status") == "verified"
         and isinstance(state.get("verified_at"), str)
         and isinstance(state.get("content_sha256"), str)

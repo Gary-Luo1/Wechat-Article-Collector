@@ -7,6 +7,7 @@ speculative pagination, and one request per account-listing page.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -49,6 +50,7 @@ _BLOCK_TAGS = re.compile(
     re.IGNORECASE,
 )
 _MAX_CACHED_CONTENT_BYTES = 100 * 1024
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 # Untrusted-API text bounds: title/digest are echoed in terminals and stored
 # in queue.json, so they are truncated and stripped of control characters and
 # invisible Unicode tag characters (a prompt-injection vector for LLMs).
@@ -56,18 +58,53 @@ _MAX_TITLE_CHARS = 512
 _MAX_DIGEST_CHARS = 2048
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _UNICODE_TAGS = re.compile("[\U000e0000-\U000e007f]")
+_BIDI_CONTROLS = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _HTML_MARKER = re.compile(r"<\s*[a-zA-Z/!]")
 _UNCLOSED_SCRIPT = re.compile(r"<(script|style)\b[^>]*>.*\Z", re.IGNORECASE | re.DOTALL)
 
 
 def sanitize_text(value: Any, limit: int) -> str:
-    """Truncate and strip unsafe characters from one untrusted API string."""
-    text = _UNICODE_TAGS.sub("", _CONTROL_CHARS.sub("", str(value or "")))
-    if "\r" in text:
-        # Normalize every CR variant to \n first so a lone \r separates words
-        # instead of being deleted and gluing them together.
-        text = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
-    return text.strip()[:limit]
+    """Return one bounded, single-line value safe for Agent-visible metadata."""
+    text = _neutralize_controls(str(value or ""))
+    return " ".join(text.split())[:limit]
+
+
+def _neutralize_controls(text: str) -> str:
+    """Remove terminal and directional controls while preserving body layout."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _UNICODE_TAGS.sub("", _BIDI_CONTROLS.sub("", text))
+    return _CONTROL_CHARS.sub("", text)
+
+
+def _bounded_json_response(response: Any) -> dict[str, Any]:
+    """Read and decode one response without buffering more than the hard cap."""
+    content_length = response.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > _MAX_RESPONSE_BYTES:
+                raise RedfoxAPIError("redfox response exceeds the 2 MiB safety limit")
+        except ValueError:
+            pass
+
+    chunks: list[bytes] = []
+    size = 0
+    # curl_cffi ignores chunk_size and warns; Requests needs it to avoid
+    # one-byte chunks. Both yield decompressed bytes in streaming mode.
+    if type(response).__module__.startswith("curl_cffi."):
+        iterator = response.iter_content()
+    else:
+        iterator = response.iter_content(chunk_size=64 * 1024)
+    for chunk in iterator:
+        if not chunk:
+            continue
+        size += len(chunk)
+        if size > _MAX_RESPONSE_BYTES:
+            raise RedfoxAPIError("redfox response exceeds the 2 MiB safety limit")
+        chunks.append(chunk)
+    data = json.loads(b"".join(chunks).decode("utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("response is not a JSON object")
+    return data
 
 
 class RedfoxAPIError(RuntimeError):
@@ -130,6 +167,7 @@ def clean_content(content: Any) -> Optional[str]:
         if _HTML_MARKER.search(content)
         else content.strip()
     )
+    text = _neutralize_controls(text)
     if not text:
         return None
     encoded = text.encode("utf-8")
@@ -190,22 +228,34 @@ class RedfoxClient:
                     if remaining > 0:
                         time.sleep(remaining)
                 self._last_request_at = time.monotonic()
-                response = self.session.post(url, json=payload, timeout=(10, 30))
-                if response.status_code in {401, 403}:
-                    raise RedfoxAuthError(
-                        "redfox API key was rejected; run the redfox key setup command "
-                        "and provide a valid key",
-                        details={"operation": operation, "http_status": response.status_code},
-                    )
-                if response.status_code == 429:
-                    raise RedfoxRateLimitError(
-                        "redfox API rate limit hit",
-                        details={"operation": operation, "http_status": 429},
-                    )
-                response.raise_for_status()
-                data = response.json()
-                if not isinstance(data, dict):
-                    raise ValueError("response is not a JSON object")
+                response = self.session.post(
+                    url,
+                    json=payload,
+                    timeout=(10, 30),
+                    allow_redirects=False,
+                    stream=True,
+                )
+                try:
+                    if 300 <= response.status_code < 400:
+                        raise RedfoxAPIError(
+                            "redfox returned an unexpected redirect",
+                            details={"operation": operation, "http_status": response.status_code},
+                        )
+                    if response.status_code in {401, 403}:
+                        raise RedfoxAuthError(
+                            "redfox API key was rejected; run the redfox key setup command "
+                            "and provide a valid key",
+                            details={"operation": operation, "http_status": response.status_code},
+                        )
+                    if response.status_code == 429:
+                        raise RedfoxRateLimitError(
+                            "redfox API rate limit hit",
+                            details={"operation": operation, "http_status": 429},
+                        )
+                    response.raise_for_status()
+                    data = _bounded_json_response(response)
+                finally:
+                    response.close()
                 code = data.get("code", 0)
                 try:
                     code = int(code)
