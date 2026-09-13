@@ -140,6 +140,26 @@
   numbering, uniform continuation indent, and the multiline description with
   its paid boundary and casual triggers.
 
+### Fixed (second skill-reviewer pass)
+
+- SKILL.md workflow steps 1 and 4 split their ~300-word paragraphs into
+  3-space sub-bullets (decisions to collect / default-roster flow / Feishu
+  destination rule, and the feishu-setup loop) so each constraint is a
+  separately addressable instruction. Semantics unchanged; all
+  `test_skill_docs.py` invariants still hold.
+- The canonical `description` adds English trigger phrasings (subscribe to
+  WeChat Official Accounts, follow an account, build an article digest, sync
+  articles to Feishu Base) alongside the Chinese ones, staying inside the
+  200-600 char window with every mandatory trigger kept.
+- The three project adapters (`.agents`/`.claude`/`.github`) now mirror the
+  canonical trigger coverage and paid-API boundary; the shortened adapter
+  description previously dropped 查公众号文章/过滤推广/追更/导出/退订 and could
+  miss those triggers inside the workspace.
+- `tools/validate_release.py` no longer misreads a colon inside the multiline
+  `description: |` block (e.g. "or in English: ...") as an extra frontmatter
+  key; indented continuation lines are skipped, matching the invariant
+  `test_skill_docs.py` already documents for the multiline form.
+
 ### BREAKING
 
 - Processed queue entries no longer carry the cached article body: completion

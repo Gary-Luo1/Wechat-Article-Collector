@@ -30,6 +30,10 @@ def read_frontmatter(path: Path) -> tuple[dict[str, str], str]:
         fail(f"{path.relative_to(ROOT)} frontmatter is not closed")
     fields = {}
     for line in parts[1].splitlines():
+        if line[:1] in (" ", "\t"):
+            # Multiline block continuation (description: |); a colon inside it
+            # is prose, not a new frontmatter key.
+            continue
         key, separator, value = line.partition(":")
         if separator:
             fields[key.strip()] = value.strip()
