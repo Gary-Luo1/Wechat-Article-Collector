@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 import json
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -306,6 +307,30 @@ def test_plain_text_with_angle_brackets_untouched():
 
 def test_unclosed_script_block_dropped():
     assert strip_html_to_text("<p>正文</p><script>var x=1;") == "正文"
+
+
+def test_content_cleanup_handles_repeated_unmatched_tags_within_budget():
+    # A subprocess timeout kills a regressed parser instead of hanging pytest.
+    subprocess.run(
+        [sys.executable, "-c", """
+from redfox_client import clean_content
+for opener in ('<a', '<p ', '<script>', '<style>'):
+    body = opener * (1024 * 1024 // len(opener))
+    result = clean_content(body)
+    if opener in ('<script>', '<style>'):
+        assert result is None
+    else:
+        assert result.endswith('\\n[truncated]')
+        assert len(result.encode()) < 103000
+assert clean_content('<p>正文</p><SCRIPT>x<style>y</style></SCRIPT><div>结尾</div>') == '正文\\n\\n结尾'
+assert clean_content('1<2 且 3>4') == '1<2 且 3>4'
+"""],
+        cwd=SCRIPTS,
+        check=True,
+        timeout=10,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_sanitize_text_lone_cr_separates_words():

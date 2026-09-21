@@ -40,15 +40,13 @@ AUTH_ERROR_CODES = {3106}
 
 # HTML snippets that indicate the content field carries markup instead of
 # plain text and must be stripped before it is cached in the queue.
-_SCRIPT_STYLE_PATTERN = re.compile(
-    r"<(script|style)\b[^>]*>.*?</\1\s*>",
-    re.IGNORECASE | re.DOTALL,
-)
-_TAG_PATTERN = re.compile(r"<[^>]+>")
-_BLOCK_TAGS = re.compile(
-    r"</?(?:p|div|br|section|li|h[1-6]|blockquote|pre|tr)\b[^>]*>",
-    re.IGNORECASE,
-)
+# Never scan past another opener: failed matches then consume disjoint spans.
+_TAG_PATTERN = re.compile(r"<([^<>]+)>")
+_TAG_NAME = re.compile(r"(/?)([a-zA-Z][a-zA-Z0-9]*)\b")
+_SCRIPT_END = re.compile(r"/(script|style)\s*\Z", re.IGNORECASE)
+_BLOCK_TAGS = {"p", "div", "br", "section", "li", "blockquote", "pre", "tr"} | {
+    f"h{level}" for level in range(1, 7)
+}
 _MAX_CACHED_CONTENT_BYTES = 100 * 1024
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 # Untrusted-API text bounds: title/digest are echoed in terminals and stored
@@ -60,7 +58,6 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _UNICODE_TAGS = re.compile("[\U000e0000-\U000e007f]")
 _BIDI_CONTROLS = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 _HTML_MARKER = re.compile(r"<\s*[a-zA-Z/!]")
-_UNCLOSED_SCRIPT = re.compile(r"<(script|style)\b[^>]*>.*\Z", re.IGNORECASE | re.DOTALL)
 
 
 def sanitize_text(value: Any, limit: int) -> str:
@@ -140,13 +137,29 @@ class RedfoxAccountAmbiguous(RedfoxAPIError):
 
 def strip_html_to_text(content: str) -> str:
     """Convert an HTML-ish content field into readable plain text."""
-    text = _SCRIPT_STYLE_PATTERN.sub("", content)
-    if "<script" in text.casefold() or "<style" in text.casefold():
-        # An unclosed script/style block has no end tag to match; everything
-        # after it is suspect, so drop the tail rather than leak JS/CSS.
-        text = _UNCLOSED_SCRIPT.sub("", text)
-    text = _BLOCK_TAGS.sub("\n", text)
-    text = _TAG_PATTERN.sub("", text)
+    parts: list[str] = []
+    position = 0
+    ignored = ""
+    for match in _TAG_PATTERN.finditer(content):
+        token = match.group(1)
+        if ignored:
+            closing = _SCRIPT_END.fullmatch(token)
+            if closing and closing.group(1).casefold() == ignored:
+                ignored = ""
+        else:
+            parts.append(content[position:match.start()])
+            tag = _TAG_NAME.match(token)
+            if tag:
+                name = tag.group(2).casefold()
+                if not tag.group(1) and name in {"script", "style"}:
+                    ignored = name
+                elif name in _BLOCK_TAGS:
+                    parts.append("\n")
+        position = match.end()
+    # Unclosed script/style blocks discard the tail, as closed blocks do.
+    if not ignored:
+        parts.append(content[position:])
+    text = "".join(parts)
     text = re.sub(r"&nbsp;?", " ", text)
     text = re.sub(r"&amp;", "&", text)
     text = re.sub(r"&lt;", "<", text)
