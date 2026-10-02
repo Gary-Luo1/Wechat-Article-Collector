@@ -17,6 +17,7 @@ from feishu_target import production_feishu_target
 from lark_runtime import LarkCLIError
 from queue_helpers import (
     complete_article,
+    has_delivery_proof,
     has_verified_read,
     is_content_truncated,
     update_sync_status,
@@ -143,7 +144,7 @@ def complete_review(
     if arguments.force_feishu and not arguments.feishu:
         raise ValueError("--force-feishu requires --feishu")
     article = resolve(arguments)
-    require_complete_content(article)
+    truncated = is_content_truncated(article)
     if arguments.ad:
         if arguments.dry_run and not arguments.feishu:
             raise ValueError("--dry-run is only valid together with --feishu")
@@ -162,7 +163,10 @@ def complete_review(
             "message": f"Skipped advertisement: {sanitize_text(article.get('title', ''), 512)}",
             "status": "skipped_ad",
         }
-    if not has_verified_read(article):
+    if truncated:
+        if not has_delivery_proof(article):
+            raise ArticleReadRequiredError()
+    elif not has_verified_read(article):
         raise ArticleReadRequiredError()
     try:
         config = load_config()
@@ -181,6 +185,31 @@ def complete_review(
         raise ValueError("--dry-run is only valid together with --feishu")
     metadata = _score_metadata(arguments)
     metadata["content_source"] = str(article.get("content_source") or "direct")
+    if truncated:
+        metadata["content_coverage"] = "incomplete"
+        # The delivered prefix can be scored. It is not a complete article, so
+        # it never becomes a Feishu row, including under --force-feishu.
+        status = "skipped_incomplete"
+        if arguments.dry_run:
+            return {
+                "message": (
+                    f"Dry run: score {metadata['score']} uses incomplete content "
+                    "and will not sync to Feishu"
+                ),
+                "status": status,
+                "score": metadata["score"],
+                "content_coverage": "incomplete",
+            }
+        complete_article(article["link"], metadata, sync_status=status)
+        return {
+            "message": (
+                f"Completed: {sanitize_text(article.get('title', ''), 512)} "
+                f"(score {metadata['score']}) | 同步: 内容不完整，已按已读部分记分，不同步飞书"
+            ),
+            "status": status,
+            "score": metadata["score"],
+            "content_coverage": "incomplete",
+        }
     sync_requested = bool(arguments.feishu or policy_sync)
     if sync_requested:
         if config is None:

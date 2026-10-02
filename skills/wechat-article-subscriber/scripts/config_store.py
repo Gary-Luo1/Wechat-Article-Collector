@@ -63,7 +63,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # URL identity is authoritative. Optional content deduplication is off by
         # default because distinct articles may legitimately reuse titles and
         # summaries.
-        "content_dedup": False,
+        "content_dedup": True,
         "min_score": 6.0,
         "output_language": "auto",
     },

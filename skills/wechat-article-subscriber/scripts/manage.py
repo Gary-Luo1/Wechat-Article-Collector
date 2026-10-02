@@ -492,7 +492,13 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             for item in subscriptions
             if item["alias"] and not item["cooldown_active"]
         ),
-        "note": "1 list call per subscription outside its cooldown, plus 1 detail call per article read",
+        "estimated_detail_call_cap": config["preferences"]["digest_limit"],
+        "read_scope": "digest_candidates",
+        "note": (
+            "1 list call per subscription outside its cooldown. "
+            "The daily read fetches at most digest_limit article bodies "
+            "(process batch-read --digest), not every queued article."
+        ),
     }
     if not arguments.yes:
         return plan, _daily_next_action(config)

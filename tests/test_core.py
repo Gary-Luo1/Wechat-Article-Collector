@@ -283,6 +283,20 @@ class TestQueue:
         assert add_pending([first, second], content_dedup=True) == 1
         assert len(get_pending()) == 1
 
+    def test_content_dedup_collapses_the_same_story_across_accounts(self):
+        from config_store import DEFAULT_CONFIG
+        from queue_helpers import add_pending, get_pending
+
+        assert DEFAULT_CONFIG["settings"]["content_dedup"] is True
+        first = article("a")
+        reprint = {
+            **first,
+            "link": "https://mp.weixin.qq.com/s/reprint",
+            "account": "Another Publisher",
+        }
+        assert add_pending([first, reprint], content_dedup=True) == 1
+        assert get_pending()[0]["account"] == "Example"
+
     def test_complete_by_stable_link(self):
         from queue_helpers import add_pending, complete_article, read_queue
 
@@ -1049,6 +1063,64 @@ class TestProcess:
             == 1
         )
 
+    def test_batch_read_digest_does_not_fetch_the_rest_of_the_inbox(self, monkeypatch):
+        import process_pending
+        from queue_helpers import add_pending
+
+        import time
+
+        self.valid_config()
+        first = article("keep", verified=False)
+        second = article("skip", verified=False)
+        now = int(time.time())
+        first["favorite"] = True
+        first["update_time"] = now
+        second["update_time"] = now
+        first.pop("content")
+        second.pop("content")
+        first["work_uuid"] = "keep-body"
+        second["work_uuid"] = "skip-body"
+        add_pending([first, second])
+        fetched: list[str] = []
+
+        class DetailClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def query_work(self, work_uuid):
+                fetched.append(work_uuid)
+                return {"content": f"body {work_uuid}"}, 2000
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("redfox_client.RedfoxClient", DetailClient)
+        assert process_pending.main(["batch-read", "--digest", "--limit", "1"]) == 0
+        assert fetched == ["keep-body"]
+
+    def test_title_ad_skips_the_paid_detail_call(self, monkeypatch, capsys):
+        import process_pending
+        from queue_helpers import add_pending
+
+        self.valid_config()
+        item = article("promo", verified=False)
+        item.pop("content")
+        item["title"] = "【广告】新课上线"
+        item["work_uuid"] = "ad-body"
+        add_pending([item])
+
+        class DetailClient:
+            def query_work(self, work_uuid):
+                raise AssertionError("title ad must not fetch a body")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("redfox_client.RedfoxClient", lambda *a, **k: DetailClient())
+        assert process_pending.main(["read", "--link", item["link"]]) == 0
+        assert "detail fetch skipped" in capsys.readouterr().out
+        assert process_pending.main(["done", "--link", item["link"], "--ad"]) == 0
+
     def test_batch_read_continues_when_article_leaves_queue_mid_batch(
         self, monkeypatch, capsys
     ):
@@ -1114,22 +1186,36 @@ class TestProcess:
         saved = read_queue()["pending"][0]
         assert saved["read_state"]["content_truncated"] is True
         assert saved["content"] == clean_content("长" * 40000)
-        for flags in (["--dims", self.dims()], ["--ad"], ["--dims", self.dims(), "--feishu", "--force-feishu"]):
-            assert process_pending.main(["--format", "json", "done", "--link", item["link"], *flags]) == 1
-            envelope = json.loads(capsys.readouterr().out)
-            assert envelope["error"]["code"] == "ARTICLE_CONTENT_INCOMPLETE"
-            assert envelope["error"]["retryable"] is False
-        assert len(read_queue()["pending"]) == 1
-
-        # Simulate a previously queued sync; dropping the body must retain coverage.
-        entry = complete_article(item["link"], {"score": 8}, sync_status="pending")
+        assert process_pending.main(
+            ["--format", "json", "done", "--link", item["link"], "--dims", self.dims(), "--feishu", "--force-feishu"]
+        ) == 0
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is True
+        assert any("内容不完整" in line for line in envelope["data"]["output"])
+        entry = next(iter(read_queue()["processed"].values()))
+        assert entry["metadata"]["content_coverage"] == "incomplete"
+        assert entry["sync_status"] == "skipped_incomplete"
         assert "content" not in entry["article"]
         assert is_content_truncated(entry["article"])
-        for selection in (["--all"], ["--link", item["link"]]):
+
+        # A previously queued sync of a truncated body still must not reach Feishu.
+        forced = {**article("forced-partial", verified=False), "work_uuid": "forced-body"}
+        forced.pop("content")
+        forced["content"] = clean_content("长" * 40000)
+        forced["read_state"] = {
+            "status": "verified",
+            "verified_at": "2026-08-08T00:00:00+00:00",
+            "content_sha256": "a" * 64,
+            "content_truncated": True,
+        }
+        add_pending([forced])
+        queued = complete_article(forced["link"], {"score": 8}, sync_status="pending")
+        assert is_content_truncated(queued["article"])
+        for selection in (["--all"], ["--link", forced["link"]]):
             assert process_pending.main(["--format", "json", "sync-feishu", *selection]) == 1
             envelope = json.loads(capsys.readouterr().out)
             assert envelope["error"]["code"] == "ARTICLE_CONTENT_INCOMPLETE"
-        assert next(iter(read_queue()["processed"].values()))["sync_status"] == "pending"
+        assert read_queue()["processed"][queued["article"]["normalized_url"]]["sync_status"] == "pending"
 
     def test_legacy_truncation_marker_blocks_completion_without_reread(self, capsys):
         import process_pending
@@ -1138,8 +1224,12 @@ class TestProcess:
         item = {**article("legacy-partial"), "content": "old cached text\n[truncated]"}
         add_pending([item])
         assert not has_verified_read(read_queue()["pending"][0])
-        assert process_pending.main(["--format", "json", "done", "--link", item["link"], "--dims", self.dims()]) == 1
-        assert json.loads(capsys.readouterr().out)["error"]["code"] == "ARTICLE_CONTENT_INCOMPLETE"
+        assert process_pending.main(["--format", "json", "done", "--link", item["link"], "--dims", self.dims()]) == 0
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is True
+        saved = next(iter(read_queue()["processed"].values()))
+        assert saved["metadata"]["content_coverage"] == "incomplete"
+        assert saved["sync_status"] == "skipped_incomplete"
 
     def test_failed_reread_keeps_existing_verified_proof(self):
         import process_pending

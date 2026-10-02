@@ -97,11 +97,11 @@ Use `manage next` as the configuration state source until it reports `ready`. Ap
    bash scripts/run.sh process --format json digest-plan --hours 24 --limit 5
    ```
 
-9. Read by stable URL, then score every non-ad article across exactly five dimensions from [references/scoring.md](references/scoring.md), and complete it. A successful `read` caches the fetched text and a delivery fingerprint; this does not prove the Agent saw all output or that the source returned the publisher's entire article. Bodies over 100 KiB are truncated and marked incomplete. Keep incomplete articles pending for partial review or dismiss them; `done` rejects known-truncated articles and unread non-ad articles. Do not score from metadata or tool output that was itself truncated. Use a temporary UTF-8 `--dims-file`; do not put large JSON on the shell command line. `done` automatically syncs qualified articles when the persisted policy allows it.
+9. Read and score only the digest candidates, bounded by `preferences.digest_limit`. Leave every other pending article unread unless the user asks for it. Score each selected non-ad article across exactly five dimensions from [references/scoring.md](references/scoring.md), using the text actually returned. A successful `read` caches the fetched text and a delivery fingerprint; this does not prove the Agent saw all output or that the source returned the publisher's entire article. Bodies over 100 KiB are truncated and marked incomplete: score that delivered portion, say so in the summary, and `done` stores `content_coverage=incomplete` without syncing it to Feishu. `done` still rejects unread non-ad articles. A title that already matches the ad heuristic is not fetched; mark it with `done --ad`. Do not score from metadata alone or from tool output that was itself truncated. Use a temporary UTF-8 `--dims-file`; do not put large JSON on the shell command line. `done` automatically syncs qualified complete articles when the persisted policy allows it.
 
    ```text
+   bash scripts/run.sh process batch-read --digest
    bash scripts/run.sh process read --link <URL>
-   bash scripts/run.sh process batch-read --limit 10
    bash scripts/run.sh process done --link <URL> --dims-file <SCORES.json> --summary '<SUMMARY>' --tags 'tag1,tag2'
    bash scripts/run.sh process done --link <URL> --ad
    ```
@@ -119,7 +119,7 @@ state its time window/timezone and scope, distinguish discovered, read, recommen
 and failed/incomplete counts, and list each recommended article's title, original
 URL, publisher/date, script-calculated score, short summary, and recommendation
 reason grounded in the read text. Report actual Feishu synced/pending/failed counts.
-Keep unread candidates and partial-content notes separate from recommendations.
+Keep unread articles out of the recommendation list. A scored article whose body was truncated stays in that list and must say the coverage is incomplete.
 If no new articles were found, say so; if cached articles were reused, identify them.
 Do not present `digest-plan` candidates or a failed collection as a completed digest.
 

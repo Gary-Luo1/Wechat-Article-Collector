@@ -339,6 +339,16 @@ def _print_article_unprotected(
 ) -> tuple[str, bool]:
     from redfox_client import sanitize_text
 
+    title = str(article.get("title", ""))
+    cached = str(article.get("content") or "").strip()
+    if not cached and is_advertisement(title, ""):
+        print(f"Title: {sanitize_text(title, 512)}")
+        print(f"URL: {article.get('link', '')}")
+        print(
+            "Ad heuristic: suspected from title; detail fetch skipped. "
+            "Mark it with done --ad."
+        )
+        return "", True
     text, was_cached = _load_article_text(article, client_holder=client_holder)
     # The nonce makes the untrusted-content boundary impossible to forge from
     # inside the body (a plain fixed marker could be echoed by a malicious
@@ -371,11 +381,29 @@ def cmd_read(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_batch_read(limit: int) -> int:
-    pending = get_pending()
+def _digest_pending(limit: int | None) -> list[dict[str, Any]]:
+    """Pending articles selected for the daily deep-read, newest-preference first."""
+    config = load_config()
+    preferences = config["preferences"]
+    bounded = preferences["digest_limit"] if limit is None else limit
+    plan = plan_digest(
+        preferences, hours=preferences["digest_hours"], limit=bounded
+    )
+    by_link = {str(article.get("link") or ""): article for article in get_pending()}
+    return [
+        by_link[str(item.get("link") or "")]
+        for item in plan["candidates"]
+        if str(item.get("link") or "") in by_link
+    ]
+
+
+def cmd_batch_read(limit: int | None, *, digest: bool = False) -> int:
+    pending = _digest_pending(limit) if digest else get_pending()
     if not pending:
-        print("No pending articles")
+        print("No digest candidates" if digest else "No pending articles")
         return 0
+    if limit is None:
+        limit = len(pending)
     requested = min(limit, len(pending))
     successful = 0
     failures = 0
@@ -547,7 +575,12 @@ def build_parser() -> argparse.ArgumentParser:
     read_parser = commands.add_parser("read")
     _add_selector(read_parser)
     batch_parser = commands.add_parser("batch-read")
-    batch_parser.add_argument("--limit", type=int, default=10)
+    batch_parser.add_argument(
+        "--digest",
+        action="store_true",
+        help="read only the current digest candidates, not the whole inbox",
+    )
+    batch_parser.add_argument("--limit", type=int)
     done_parser = commands.add_parser("done")
     _add_selector(done_parser)
     done_parser.add_argument("--ad", action="store_true")
@@ -604,9 +637,10 @@ def _dispatch(arguments: argparse.Namespace) -> int:
     if arguments.command == "read":
         return cmd_read(arguments)
     if arguments.command == "batch-read":
-        if arguments.limit < 1 or arguments.limit > 100:
+        if arguments.limit is not None and (arguments.limit < 1 or arguments.limit > 100):
             raise ValueError("--limit must be between 1 and 100")
-        return cmd_batch_read(arguments.limit)
+        limit = arguments.limit if arguments.digest or arguments.limit is not None else 10
+        return cmd_batch_read(limit, digest=arguments.digest)
     if arguments.command == "done":
         if arguments.index is None and not arguments.link:
             raise ValueError("provide an index or --link")

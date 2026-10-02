@@ -32,19 +32,20 @@ def normalize_url(url: str) -> str:
 
 
 def content_hash(article: dict[str, Any]) -> str | None:
-    """Return a conservative secondary identity or None.
+    """Return a secondary identity for the same story, or None.
 
-    A title/account pair is not unique: publishers routinely reuse titles and
-    omit digests. Only produce a secondary identity when all content signals and
-    a publication timestamp are present. Normalized URL remains authoritative.
+    Publishers reprint one piece under different account names. The hash uses
+    title, digest, and publish time, and omits the account, so content dedup
+    collapses those reprints before a second body is fetched. A missing digest
+    or timestamp produces no hash: titles alone are reused too often. The
+    normalized URL remains the primary identity.
     """
-    values = [
-        str(article.get(key, "")).strip()
-        for key in ("title", "digest", "account", "update_time")
-    ]
-    if not all(values) or values[3] in {"0", "None"}:
+    title = str(article.get("title", "")).strip()
+    digest = str(article.get("digest", "")).strip()
+    stamp = str(article.get("update_time", "")).strip()
+    if not title or not digest or stamp in {"", "0", "None"}:
         return None
-    return hashlib.sha256("|".join(values).encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{title}|{digest}|{stamp}".encode("utf-8")).hexdigest()
 
 
 @contextmanager
@@ -353,21 +354,26 @@ def is_content_truncated(article: dict[str, Any]) -> bool:
     return content.endswith("\n[truncated]")
 
 
-def has_verified_read(article: dict[str, Any]) -> bool:
-    """Return whether fetched text has a read proof without known truncation.
+def has_delivery_proof(article: dict[str, Any]) -> bool:
+    """Return whether a fetched body was stored with a local delivery proof.
 
     This proves local delivery, not that the Agent consumed every output token
     or that the upstream source supplied the publisher's entire article.
+    Truncated bodies still carry this proof; `has_verified_read` does not.
     """
     state = article.get("read_state")
     return (
         isinstance(state, dict)
-        and not is_content_truncated(article)
         and state.get("status") == "verified"
         and isinstance(state.get("verified_at"), str)
         and isinstance(state.get("content_sha256"), str)
         and bool(re.fullmatch(r"[0-9a-f]{64}", state["content_sha256"]))
     )
+
+
+def has_verified_read(article: dict[str, Any]) -> bool:
+    """Return whether fetched text has a delivery proof and is not truncated."""
+    return has_delivery_proof(article) and not is_content_truncated(article)
 
 
 def update_inbox_item(

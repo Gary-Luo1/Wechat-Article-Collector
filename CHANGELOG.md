@@ -33,6 +33,13 @@
   stop the run.
 - Article body reads honor `settings.request_delay`. `batch-read` reuses one
   client so the delay applies between paid detail calls.
+- The daily read is `process batch-read --digest` and stops at
+  `preferences.digest_limit` instead of scoring every queued article.
+- `content_dedup` now defaults on and ignores the account name, so the same
+  title, digest, and publish time from two accounts is queued once.
+- A truncated body can be scored locally. `done` stores
+  `content_coverage=incomplete` and still refuses to sync it to Feishu.
+  Title-only ads are not fetched.
 
 ### Changed (runtime-cost and queue-size optimization)
 
