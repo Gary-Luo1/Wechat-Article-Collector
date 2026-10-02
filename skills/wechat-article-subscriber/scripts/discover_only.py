@@ -13,14 +13,24 @@ from pathlib import Path
 from config_store import ConfigError, load_config, modify_config
 from protocol import dump, failure, success
 from queue_helpers import add_pending, cleanup_processed
-from redfox_client import RedfoxAPIError, RedfoxClient
+from redfox_client import RedfoxAPIError, RedfoxAuthError, RedfoxClient
 
 
 logger = logging.getLogger("wechat-discover")
 
 
-def _subscription_cooldown_active(subscription: dict, interval_hours: float) -> bool:
-    """Paid-API guard: skip a subscription still inside its discovery cooldown."""
+def _subscription_cooldown_active(
+    subscription: dict,
+    interval_hours: float,
+    requested_hours: float | None = None,
+) -> bool:
+    """Skip a paid list only when a recent fetch already covered this window.
+
+    ``interval_hours`` is the billing cooldown (``check_hours``). A shorter
+    manual lookback must not consume that cooldown: the next full-window run
+    would otherwise skip the account and permanently miss the gap. Rows saved
+    before the covered window was recorded are treated as a full-interval fetch.
+    """
     raw = str(subscription.get("last_discovered_at", "")).strip()
     if not raw:
         return False
@@ -30,10 +40,26 @@ def _subscription_cooldown_active(subscription: dict, interval_hours: float) -> 
         return False
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - last).total_seconds() < interval_hours * 3600
+    elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+    if elapsed >= interval_hours * 3600:
+        return False
+    requested = interval_hours if requested_hours is None else float(requested_hours)
+    covered = subscription.get("last_discovered_window_hours")
+    if covered is None or covered == "":
+        covered_hours = interval_hours
+    else:
+        try:
+            covered_hours = float(covered)
+        except (TypeError, ValueError):
+            return False
+    return covered_hours + 1e-9 >= requested
 
 
-def _mark_subscription_discovered(identity: tuple[str, str, str], config_path: Path | None) -> None:
+def _mark_subscription_discovered(
+    identity: tuple[str, str, str],
+    config_path: Path | None,
+    window_hours: float,
+) -> None:
     now = datetime.now(timezone.utc).isoformat()
 
     def mutate(saved: dict) -> dict:
@@ -44,6 +70,7 @@ def _mark_subscription_discovered(identity: tuple[str, str, str], config_path: P
                 str(sub.get("biz", "")).strip(),
             ) == identity:
                 sub["last_discovered_at"] = now
+                sub["last_discovered_window_hours"] = float(window_hours)
                 return saved
         # A concurrent edit changed the subscription identity; without the
         # timestamp the paid-call cooldown cannot apply next cycle.
@@ -72,6 +99,7 @@ def discover_articles(
     cutoff = time.time() - hours * 3600
     interval_hours = float(config["settings"]["check_hours"])
     discovered: list[dict] = []
+    account_errors: list[RedfoxAPIError] = []
     try:
         for subscription in config["subscriptions"]:
             name = str(subscription.get("name", "")).strip()
@@ -102,7 +130,9 @@ def discover_articles(
                     if diagnostics is not None:
                         diagnostics.append(diagnostic)
                     continue
-                if not force and _subscription_cooldown_active(subscription, interval_hours):
+                if not force and _subscription_cooldown_active(
+                    subscription, interval_hours, hours
+                ):
                     diagnostic["status"] = "ok"
                     diagnostic["skipped_cooldown"] = 1
                     if diagnostics is not None:
@@ -158,7 +188,7 @@ def discover_articles(
                     # The paid listing already succeeded; arm the cooldown so a
                     # persistent queue failure cannot re-charge every cycle. If
                     # this write fails too, its error replaces the queue error.
-                    _mark_subscription_discovered((name, alias, biz), config_path)
+                    _mark_subscription_discovered((name, alias, biz), config_path, hours)
                     raise
                 discovered.extend(account_articles)
                 diagnostic["status"] = "ok"
@@ -166,15 +196,22 @@ def discover_articles(
                     diagnostic["window_empty"] = True
                 if diagnostics is not None:
                     diagnostics.append(diagnostic)
-                _mark_subscription_discovered((name, alias, biz), config_path)
+                _mark_subscription_discovered((name, alias, biz), config_path, hours)
             except RedfoxAPIError as exc:
                 diagnostic["status"] = "blocked"
                 diagnostic["error"] = type(exc).__name__
                 if diagnostics is not None:
                     diagnostics.append(diagnostic)
-                raise
+                # A bad key, a rate limit, or a dead network will fail every
+                # later account the same way. An account-specific API error
+                # must not skip the rest of the roster.
+                if exc.retryable or isinstance(exc, RedfoxAuthError):
+                    raise
+                account_errors.append(exc)
     finally:
         client.close()
+    if account_errors:
+        raise account_errors[0]
     return discovered
 
 

@@ -22,6 +22,18 @@
   first (with its count in the question); when it is absent or empty, it falls
   back to the previous per-account collection question.
 
+### Fixed (discovery coverage and detail-call spacing)
+
+- A manual `discover --hours N` shorter than `check_hours` no longer arms the
+  full cooldown. The cooldown skips a later list call only when the previous
+  fetch already covered the requested lookback, so a one-hour check cannot
+  drop the rest of the daily window.
+- One account's list API error is recorded and discovery continues with the
+  remaining accounts. Authentication, rate-limit, and transport failures still
+  stop the run.
+- Article body reads honor `settings.request_delay`. `batch-read` reuses one
+  client so the delay applies between paid detail calls.
+
 ### Changed (runtime-cost and queue-size optimization)
 
 - Batch Feishu sync runs one preflight per batch instead of per record:

@@ -216,10 +216,149 @@ def test_cooldown_persisted_across_discovery_cycles(isolated_home, monkeypatch):
     discover_articles(load_config(), 24, None, diagnostics, None)
     saved = load_config()
     assert saved["subscriptions"][0]["last_discovered_at"]  # persisted for next cycle
+    assert saved["subscriptions"][0]["last_discovered_window_hours"] == 24
     diagnostics.clear()
     discover_articles(saved, 24, None, diagnostics, None)
     assert fake.calls == 1  # second cycle made no paid call
     assert diagnostics[0]["skipped_cooldown"] == 1
+
+
+def test_short_window_does_not_cover_a_later_full_window(isolated_home, monkeypatch):
+    from config_store import save_config
+
+    save_config(_config())
+    fake = _FakeRedfoxClient([])
+    monkeypatch.setattr("discover_only.RedfoxClient", lambda *a, **k: fake)
+    discover_articles(load_config(), 1, None, [], None)
+    saved = load_config()
+    assert saved["subscriptions"][0]["last_discovered_window_hours"] == 1
+    narrow = saved["subscriptions"][0]
+    assert _subscription_cooldown_active(narrow, 24, requested_hours=1)
+    assert not _subscription_cooldown_active(narrow, 24, requested_hours=24)
+    diagnostics: list[dict] = []
+    discover_articles(saved, 24, None, diagnostics, None)
+    assert fake.calls == 2
+    assert diagnostics[0]["skipped_cooldown"] == 0
+
+
+def test_wider_recent_fetch_still_covers_a_shorter_window():
+    covered = {
+        "name": "人民日报",
+        "alias": "rmrb",
+        "last_discovered_at": datetime.now(timezone.utc).isoformat(),
+        "last_discovered_window_hours": 48,
+    }
+    assert _subscription_cooldown_active(covered, 24, requested_hours=24)
+    assert not _subscription_cooldown_active(covered, 24, requested_hours=72)
+
+
+def test_account_api_error_continues_with_later_accounts(isolated_home, monkeypatch):
+    from config_store import save_config
+    from redfox_client import RedfoxAPIError
+
+    config = _config()
+    config["subscriptions"] = [
+        {"name": "甲", "alias": "alpha"},
+        {"name": "乙", "alias": "beta"},
+    ]
+    save_config(config)
+
+    class _Flaky:
+        def __init__(self):
+            self.accounts: list[str] = []
+
+        def list_articles(self, *, account="", **kwargs):
+            self.accounts.append(account)
+            if account == "alpha":
+                raise RedfoxAPIError("account listing rejected")
+            return [], {"pages": 1, "empty_reason": "exhausted", "api_code": 2000}
+
+        def close(self):
+            pass
+
+    fake = _Flaky()
+    monkeypatch.setattr("discover_only.RedfoxClient", lambda *a, **k: fake)
+    diagnostics: list[dict] = []
+    with pytest.raises(RedfoxAPIError, match="account listing rejected"):
+        discover_articles(load_config(), 24, None, diagnostics, None)
+    assert fake.accounts == ["alpha", "beta"]
+    assert [item["status"] for item in diagnostics] == ["blocked", "ok"]
+    assert diagnostics[0]["error"] == "RedfoxAPIError"
+
+
+def test_auth_error_stops_the_remaining_roster(isolated_home, monkeypatch):
+    from redfox_client import RedfoxAuthError
+
+    config = _config()
+    config["subscriptions"] = [
+        {"name": "甲", "alias": "alpha"},
+        {"name": "乙", "alias": "beta"},
+    ]
+
+    class _Auth:
+        def __init__(self):
+            self.accounts: list[str] = []
+
+        def list_articles(self, *, account="", **kwargs):
+            self.accounts.append(account)
+            raise RedfoxAuthError("redfox API key was rejected")
+
+        def close(self):
+            pass
+
+    fake = _Auth()
+    monkeypatch.setattr("discover_only.RedfoxClient", lambda *a, **k: fake)
+    diagnostics: list[dict] = []
+    with pytest.raises(RedfoxAuthError):
+        discover_articles(config, 24, None, diagnostics, None)
+    assert fake.accounts == ["alpha"]
+    assert diagnostics[0]["status"] == "blocked"
+
+
+def test_batch_read_reuses_one_delayed_detail_client(isolated_home, monkeypatch):
+    import process_pending
+    from config_store import save_config
+
+    config = _config()
+    config["settings"]["request_delay"] = 3
+    save_config(config)
+    add_pending(
+        [
+            {
+                "title": "one",
+                "link": "https://mp.weixin.qq.com/s?__biz=1&mid=1&idx=1&sn=delay1",
+                "account": "a",
+                "content_source": "redfox",
+                "work_uuid": "U1",
+            },
+            {
+                "title": "two",
+                "link": "https://mp.weixin.qq.com/s?__biz=1&mid=1&idx=1&sn=delay2",
+                "account": "a",
+                "content_source": "redfox",
+                "work_uuid": "U2",
+            },
+        ]
+    )
+    created: list[float] = []
+    closed: list[int] = []
+
+    class _Delayed:
+        def __init__(self, api_key, request_delay=0):
+            created.append(request_delay)
+            self.queries = 0
+
+        def query_work(self, work_uuid):
+            self.queries += 1
+            return {"content": f"body {work_uuid}"}, 2000
+
+        def close(self):
+            closed.append(1)
+
+    monkeypatch.setattr("redfox_client.RedfoxClient", _Delayed)
+    assert process_pending.main(["batch-read", "--limit", "2"]) == 0
+    assert created == [3]
+    assert closed == [1]
 
 
 def test_agent_payload_without_credentials_keeps_redfox_key():

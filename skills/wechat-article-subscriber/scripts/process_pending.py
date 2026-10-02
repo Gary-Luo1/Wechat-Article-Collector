@@ -252,13 +252,31 @@ def _metadata_result(result: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
-def _load_article_text(article: dict[str, Any]) -> tuple[str, bool]:
+def _open_detail_client(config: dict[str, Any]) -> Any:
+    """One detail client that honors the configured spacing between paid calls."""
+    from redfox_client import RedfoxClient
+
+    api_key = config["redfox"]["api_key"].strip()
+    if not api_key:
+        raise ConfigError("redfox API key is missing; run the redfox key setup command")
+    return RedfoxClient(
+        api_key, request_delay=float(config["settings"]["request_delay"])
+    )
+
+
+def _load_article_text(
+    article: dict[str, Any],
+    *,
+    client_holder: dict[str, Any] | None = None,
+) -> tuple[str, bool]:
     """Return (body, was_cached); fetches once via the paid detail endpoint.
 
     The fetched body is not written here: the caller persists it together with
-    the verified-read proof in one queue transaction.
+    the verified-read proof in one queue transaction. A shared ``client_holder``
+    keeps one delayed client across a batch so ``request_delay`` applies between
+    detail calls; a one-off read opens and closes its own client.
     """
-    from redfox_client import RedfoxClient, clean_content
+    from redfox_client import clean_content
 
     cached = str(article.get("content") or "").strip()
     if cached:
@@ -272,15 +290,20 @@ def _load_article_text(article: dict[str, Any]) -> tuple[str, bool]:
             "work_uuid; re-run discover, or dismiss it"
         )
     config = load_config()
-    api_key = config["redfox"]["api_key"].strip()
-    if not api_key:
-        raise ConfigError("redfox API key is missing; run the redfox key setup command")
-    client = RedfoxClient(api_key)
+    owned = False
+    client = None if client_holder is None else client_holder.get("client")
+    if client is None:
+        client = _open_detail_client(config)
+        if client_holder is None:
+            owned = True
+        else:
+            client_holder["client"] = client
     try:
         detail, api_code = client.query_work(work_uuid)
         text = clean_content(detail.get("content"))
     finally:
-        client.close()
+        if owned:
+            client.close()
     if not text:
         if api_code == 3203:
             raise ValueError(
@@ -294,21 +317,29 @@ def _load_article_text(article: dict[str, Any]) -> tuple[str, bool]:
     return text, False
 
 
-def _print_article(article: dict[str, Any]) -> tuple[str, bool]:
+def _print_article(
+    article: dict[str, Any],
+    *,
+    client_holder: dict[str, Any] | None = None,
+) -> tuple[str, bool]:
     from redfox_client import RedfoxAPIError
 
     try:
-        return _print_article_unprotected(article)
+        return _print_article_unprotected(article, client_holder=client_holder)
     except RedfoxAPIError as exc:
         # Keep the protocol envelope intact for automation (main() only catches
         # ValueError subclasses) while preserving the REDFOX code/retryable.
         raise ArticleFetchPaidError(exc) from exc
 
 
-def _print_article_unprotected(article: dict[str, Any]) -> tuple[str, bool]:
+def _print_article_unprotected(
+    article: dict[str, Any],
+    *,
+    client_holder: dict[str, Any] | None = None,
+) -> tuple[str, bool]:
     from redfox_client import sanitize_text
 
-    text, was_cached = _load_article_text(article)
+    text, was_cached = _load_article_text(article, client_holder=client_holder)
     # The nonce makes the untrusted-content boundary impossible to forge from
     # inside the body (a plain fixed marker could be echoed by a malicious
     # article to fake trusted trailing output).
@@ -348,16 +379,22 @@ def cmd_batch_read(limit: int) -> int:
     requested = min(limit, len(pending))
     successful = 0
     failures = 0
-    for index, article in enumerate(pending[:limit], start=1):
-        print(f"\n===== ARTICLE {index}/{requested} =====")
-        try:
-            _print_article(article)
-            successful += 1
-        except (ValueError, LookupError, ConfigError) as exc:
-            # LookupError: the article left the pending list mid-batch (another
-            # process completed or dismissed it); keep the batch going.
-            failures += 1
-            print(f"[Article read failed: {exc}]")
+    client_holder: dict[str, Any] = {}
+    try:
+        for index, article in enumerate(pending[:limit], start=1):
+            print(f"\n===== ARTICLE {index}/{requested} =====")
+            try:
+                _print_article(article, client_holder=client_holder)
+                successful += 1
+            except (ValueError, LookupError, ConfigError) as exc:
+                # LookupError: the article left the pending list mid-batch (another
+                # process completed or dismissed it); keep the batch going.
+                failures += 1
+                print(f"[Article read failed: {exc}]")
+    finally:
+        client = client_holder.get("client")
+        if client is not None:
+            client.close()
     if len(pending) > limit:
         print(f"Stopped at --limit {limit}; {len(pending) - limit} articles remain")
     if failures:

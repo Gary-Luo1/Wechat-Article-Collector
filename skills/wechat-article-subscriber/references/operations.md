@@ -74,7 +74,7 @@ the full online check. Do not run both for the same unchanged setup.
 Notes and limits:
 
 - The redfox API key is stored under `redfox.api_key` (0600 stdin baseline) and never appears in output beyond its last four characters.
-- Discovery is billing-aware: a per-subscription cooldown skips paid calls within the configured `check_hours` interval, and pagination stops as soon as an article older than the lookback window appears.
+- Discovery is billing-aware: a per-subscription cooldown skips a paid list call only when a fetch inside the `check_hours` interval already covered the requested lookback. A shorter manual window does not consume the full cooldown, so the next full-window run still collects the gap. Pagination stops as soon as an article older than the lookback window appears. An account-specific list error is recorded and the roster continues; authentication, rate-limit, and transport failures still stop the run.
 - Reads reuse a cached body (`content`/`content_source`); otherwise they fetch once via the queued `work_uuid`. An entry with neither a cache nor a `work_uuid` cannot be read. Known-truncated bodies stay available for partial review but cannot be scored, completed, or synced; rereading the cache cannot restore missing text.
 - Data comes from the redfox wide library (广域库): freshest coverage, newest-first ordering. Accounts are identified by wechat alias — subscriptions without an alias are reported as unresolved.
 
