@@ -105,6 +105,7 @@ ACTION_LABELS = {
     "finish_existing_user_base_authorization": "完成等待中的扫码授权",
     "continue_resource_provisioning": "继续被批准的资源创建",
     "read_score_digest_candidates": "阅读并评分简报候选文章",
+    "rerun_discovery_for_truncated_accounts": "有公众号超出每号篇数上限，再发现一次以继续拉取",
     "generate_digest_plan": "生成文章简报计划",
     "treat_as_already_done": "目标已存在，视为完成",
     "ask_user_for_search_window": "选择文章搜索时间范围",
@@ -527,6 +528,11 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
         "accounts": diagnostics,
         "digest_candidates": digest["candidates"],
     }
+    truncated_open = any(
+        item.get("truncated") and not item.get("cooldown_armed") for item in diagnostics
+    )
+    if truncated_open:
+        return plan, "rerun_discovery_for_truncated_accounts"
     return plan, "read_score_digest_candidates"
 
 

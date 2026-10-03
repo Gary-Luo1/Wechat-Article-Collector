@@ -12,11 +12,16 @@ from pathlib import Path
 
 from config_store import ConfigError, load_config, modify_config
 from protocol import dump, failure, success
-from queue_helpers import add_pending, cleanup_processed
+from queue_helpers import add_pending, cleanup_processed, read_queue
 from redfox_client import RedfoxAPIError, RedfoxAuthError, RedfoxClient
 
 
 logger = logging.getLogger("wechat-discover")
+
+# A busy account can exceed max_articles_per_account. Each partial pass
+# fetches the next batch and leaves the cooldown unarmed. After this many
+# partial passes the cooldown is armed anyway so a full feed cannot bill forever.
+PARTIAL_DISCOVERY_LIMIT = 3
 
 
 def _subscription_cooldown_active(
@@ -71,6 +76,7 @@ def _mark_subscription_discovered(
             ) == identity:
                 sub["last_discovered_at"] = now
                 sub["last_discovered_window_hours"] = float(window_hours)
+                sub.pop("discovery_partial_runs", None)
                 return saved
         # A concurrent edit changed the subscription identity; without the
         # timestamp the paid-call cooldown cannot apply next cycle.
@@ -81,6 +87,53 @@ def _mark_subscription_discovered(
         return saved
 
     modify_config(mutate, path=config_path)
+
+
+def _mark_partial_discovery(identity: tuple[str, str, str], config_path: Path | None, runs: int) -> None:
+    """Remember an unfinished window without starting the paid cooldown."""
+
+    def mutate(saved: dict) -> dict:
+        for sub in saved["subscriptions"]:
+            if (
+                str(sub.get("name", "")).strip(),
+                str(sub.get("alias", "")).strip(),
+                str(sub.get("biz", "")).strip(),
+            ) == identity:
+                sub.pop("last_discovered_at", None)
+                sub.pop("last_discovered_window_hours", None)
+                sub["discovery_partial_runs"] = runs
+                return saved
+        return saved
+
+    modify_config(mutate, path=config_path)
+
+
+def _queued_links() -> set[str]:
+    """Links already stored, so a later partial pass can continue past them."""
+    links: set[str] = set()
+    queue = read_queue()
+    for article in queue["pending"]:
+        for key in ("link", "normalized_url"):
+            value = str(article.get(key) or "").strip()
+            if value:
+                links.add(value)
+    for entry in queue["processed"].values():
+        article = entry.get("article") if isinstance(entry, dict) else None
+        if not isinstance(article, dict):
+            continue
+        for key in ("link", "normalized_url"):
+            value = str(article.get(key) or "").strip()
+            if value:
+                links.add(value)
+    return links
+
+
+def _partial_runs(subscription: dict) -> int:
+    raw = subscription.get("discovery_partial_runs") or 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
 
 
 def discover_articles(
@@ -100,6 +153,7 @@ def discover_articles(
     interval_hours = float(config["settings"]["check_hours"])
     discovered: list[dict] = []
     account_errors: list[RedfoxAPIError] = []
+    known_links = _queued_links()
     try:
         for subscription in config["subscriptions"]:
             name = str(subscription.get("name", "")).strip()
@@ -143,6 +197,7 @@ def discover_articles(
                     account=alias,
                     cutoff_epoch=cutoff,
                     max_articles=limit,
+                    skip_links=known_links,
                 )
                 diagnostic["fetched"] = len(raw_articles)
                 if listing_info["empty_reason"] == "no_data":
@@ -174,6 +229,7 @@ def discover_articles(
                     if article["work_uuid"]:
                         entry["work_uuid"] = article["work_uuid"]
                     account_articles.append(entry)
+                    known_links.add(entry["link"])
                     diagnostic["recent"] += 1
                 try:
                     if on_account_articles is not None:
@@ -194,9 +250,25 @@ def discover_articles(
                 diagnostic["status"] = "ok"
                 if listing_info["empty_reason"] == "outside_window" and not account_articles:
                     diagnostic["window_empty"] = True
+                truncated = bool(listing_info.get("more_in_window")) or (
+                    listing_info.get("empty_reason") == "limit_reached"
+                )
+                identity = (name, alias, biz)
+                if truncated:
+                    diagnostic["truncated"] = True
+                    diagnostic["coverage"] = "incomplete"
+                    diagnostic["note"] = "本号还有文章没拉完"
+                    runs = _partial_runs(subscription) + 1
+                    if runs < PARTIAL_DISCOVERY_LIMIT:
+                        diagnostic["cooldown_armed"] = False
+                        if diagnostics is not None:
+                            diagnostics.append(diagnostic)
+                        _mark_partial_discovery(identity, config_path, runs)
+                        continue
+                diagnostic["cooldown_armed"] = True
                 if diagnostics is not None:
                     diagnostics.append(diagnostic)
-                _mark_subscription_discovered((name, alias, biz), config_path, hours)
+                _mark_subscription_discovered(identity, config_path, hours)
             except RedfoxAPIError as exc:
                 diagnostic["status"] = "blocked"
                 diagnostic["error"] = type(exc).__name__
@@ -292,14 +364,25 @@ def main(argv: list[str] | None = None) -> int:
             "queued": queued,
             "accounts": diagnostics,
         }
+        truncated_open = any(
+            item.get("truncated") and not item.get("cooldown_armed") for item in diagnostics
+        )
         if json_output:
-            print(dump(success(data, next_action="process_pending_articles")))
+            print(dump(success(
+                data,
+                next_action=(
+                    "rerun_discovery_for_truncated_accounts"
+                    if truncated_open
+                    else "process_pending_articles"
+                ),
+            )))
         else:
             for item in diagnostics:
+                note = f"; {item['note']}" if item.get("note") else ""
                 print(
                     f"{item['account']}: {item['status']}; fetched={item['fetched']}; "
                     f"recent={item['recent']}; queued={item['queued']}; "
-                    f"invalid={item['invalid']}"
+                    f"invalid={item['invalid']}{note}"
                 )
             print(f"Discovered {len(articles)} recent articles; queued {queued} new articles")
         return 0

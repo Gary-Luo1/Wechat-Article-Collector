@@ -177,6 +177,45 @@ def test_pagination_stops_at_cutoff(monkeypatch):
     assert len(session.calls) == 1
 
 
+def _work(sn: str, title: str) -> dict:
+    return {
+        "title": title,
+        "workUrl": f"http://mp.weixin.qq.com/s?__biz=1&mid=1&idx=1&sn={sn}",
+        "workUuid": sn,
+        "publishTime": _beijing_now_str(),
+    }
+
+
+def test_cap_reports_more_articles_still_in_window(monkeypatch):
+    page = [_work(f"n{index}", f"title {index}") for index in range(12)]
+    client, session = _client(monkeypatch, [{"code": 2000, "data": {"list": page}}])
+    articles, info = client.list_articles(
+        account="rmrb", cutoff_epoch=int(time.time()) - 3600, max_articles=10
+    )
+    assert len(articles) == 10
+    assert info["empty_reason"] == "limit_reached"
+    assert info["more_in_window"] is True
+    assert len(session.calls) == 1
+
+
+def test_skip_links_continue_past_articles_already_queued(monkeypatch):
+    page = [_work(f"s{index}", f"title {index}") for index in range(12)]
+    client, _ = _client(monkeypatch, [{"code": 2000, "data": {"list": page}}])
+    first, _ = client.list_articles(
+        account="rmrb", cutoff_epoch=int(time.time()) - 3600, max_articles=10
+    )
+    client, session = _client(monkeypatch, [{"code": 2000, "data": {"list": page}}])
+    rest, info = client.list_articles(
+        account="rmrb",
+        cutoff_epoch=int(time.time()) - 3600,
+        max_articles=10,
+        skip_links={item["link"] for item in first},
+    )
+    assert [item["title"] for item in rest] == ["title 10", "title 11"]
+    assert info["more_in_window"] is False
+    assert len(session.calls) == 1
+
+
 def test_format_article_requires_title_and_link(monkeypatch):
     client, _ = _client(monkeypatch, [{"code": 2000, "data": {"list": [{"title": "no url"}]}}])
     assert client.query_work_list(account="x") == ([{"title": "no url"}], 2000)

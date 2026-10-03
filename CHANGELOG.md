@@ -40,6 +40,10 @@
 - A truncated body can be scored locally. `done` stores
   `content_coverage=incomplete` and still refuses to sync it to Feishu.
   Title-only ads are not fetched.
+- When an account still has in-window articles past `max_articles_per_account`,
+  discovery reports `本号还有文章没拉完` and does not arm the cooldown. The next
+  pass skips links already queued. After three partial passes the cooldown is
+  armed so a busy feed cannot bill without limit.
 
 ### Changed (runtime-cost and queue-size optimization)
 

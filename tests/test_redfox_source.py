@@ -33,7 +33,7 @@ class _FakeRedfoxClient:
         self.articles = articles
         self.calls = 0
 
-    def list_articles(self, *, account="", account_name="", cutoff_epoch=0, max_articles=100):
+    def list_articles(self, *, account="", account_name="", cutoff_epoch=0, max_articles=100, **kwargs):
         self.calls += 1
         return self.articles, {
             "pages": 1,
@@ -239,6 +239,49 @@ def test_short_window_does_not_cover_a_later_full_window(isolated_home, monkeypa
     discover_articles(saved, 24, None, diagnostics, None)
     assert fake.calls == 2
     assert diagnostics[0]["skipped_cooldown"] == 0
+
+
+def test_limit_reached_does_not_arm_cooldown_until_three_passes(isolated_home, monkeypatch):
+    from config_store import save_config
+
+    save_config(_config())
+    article = {
+        "title": "t",
+        "link": "https://mp.weixin.qq.com/s?__biz=1&mid=1&idx=1&sn=cap1",
+        "digest": "d",
+        "work_uuid": "U",
+        "update_time": int(time.time()),
+    }
+    fake = _FakeArticlesClient(
+        [article],
+        {
+            "pages": 1,
+            "empty_reason": "limit_reached",
+            "more_in_window": True,
+            "api_code": 2000,
+        },
+    )
+    monkeypatch.setattr("discover_only.RedfoxClient", lambda *a, **k: fake)
+
+    def persist(articles):
+        return 1
+
+    for expected_runs in (1, 2):
+        diagnostics: list[dict] = []
+        discover_articles(load_config(), 24, None, diagnostics, persist)
+        assert diagnostics[0]["truncated"] is True
+        assert diagnostics[0]["note"] == "本号还有文章没拉完"
+        assert diagnostics[0]["cooldown_armed"] is False
+        saved = load_config()["subscriptions"][0]
+        assert "last_discovered_at" not in saved
+        assert saved["discovery_partial_runs"] == expected_runs
+    discover_articles(load_config(), 24, None, [], persist)
+    armed = load_config()["subscriptions"][0]
+    assert armed.get("last_discovered_at")
+    assert "discovery_partial_runs" not in armed
+    assert fake.calls == 3
+    discover_articles(load_config(), 24, None, [], persist)
+    assert fake.calls == 3
 
 
 def test_wider_recent_fetch_still_covers_a_shorter_window():

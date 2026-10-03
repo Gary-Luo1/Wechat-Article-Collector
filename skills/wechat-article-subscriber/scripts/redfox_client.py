@@ -192,6 +192,17 @@ def clean_content(content: Any) -> Optional[str]:
     return text
 
 
+def _canonical_link_set(links: set[str] | None) -> set[str]:
+    """Normalize caller-supplied URLs so they match formatted article links."""
+    skipped: set[str] = set()
+    for link in links or ():
+        try:
+            skipped.add(canonicalize_wechat_article_url(str(link)))
+        except (TypeError, ValueError):
+            continue
+    return skipped
+
+
 def _parse_publish_time(value: Any) -> int:
     """Best-effort epoch seconds from publishTime; 0 when unparseable.
 
@@ -380,6 +391,7 @@ class RedfoxClient:
         cutoff_epoch: int = 0,
         max_articles: int = 100,
         page_size: int = 20,
+        skip_links: set[str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Collect works into the lookback window, cheapest-first.
 
@@ -393,11 +405,20 @@ class RedfoxClient:
         """
         collected: list[dict[str, Any]] = []
         seen_links: set[str] = set()
+        skipped = _canonical_link_set(skip_links)
         offset = 0
         pages = 0
         api_code = 0
         empty_reason = "exhausted"
-        max_pages = (max_articles + page_size - 1) // page_size + 2
+        more_in_window = False
+        last_page_full = False
+        # Walk past links already queued by an earlier partial pass, then stop
+        # at the caller's cap. The extra page budget is bounded so a skip set
+        # cannot turn one account into an open-ended billed loop.
+        skip_pages = (len(skipped) + page_size - 1) // page_size if skipped else 0
+        max_pages = min(
+            10, (max_articles + page_size - 1) // page_size + 2 + skip_pages
+        )
         while len(collected) < max_articles and pages < max_pages:
             items, api_code = self.query_work_list(
                 account=account, offset=offset, count=page_size
@@ -406,8 +427,10 @@ class RedfoxClient:
             if not items:
                 empty_reason = "no_data" if api_code == 3203 else "exhausted"
                 break
+            last_page_full = len(items) >= page_size
             eligible = 0
             old_or_invalid = 0
+            known = 0
             for raw in items:
                 article = self.format_article(raw)
                 if article is None:
@@ -418,6 +441,9 @@ class RedfoxClient:
                     # the same items again.
                     old_or_invalid += 1
                     continue
+                if article["link"] in skipped:
+                    known += 1
+                    continue
                 if (
                     cutoff_epoch
                     and article["update_time"]
@@ -425,21 +451,45 @@ class RedfoxClient:
                 ):
                     old_or_invalid += 1
                     continue
+                if len(collected) >= max_articles:
+                    # This page still has an in-window article past the cap.
+                    more_in_window = True
+                    continue
                 seen_links.add(article["link"])
                 collected.append(article)
                 eligible += 1
-                if len(collected) >= max_articles:
-                    break
+            if more_in_window:
+                empty_reason = "limit_reached"
+                break
             if len(items) < page_size:
                 break
-            if eligible == 0 and old_or_invalid == len(items):
+            if eligible == 0 and known == 0 and old_or_invalid == len(items):
                 # Whole page outside the window or unusable: no later page can
                 # help a newest-first feed, and a misbehaving feed must not
                 # create an unbounded paid loop.
                 empty_reason = "outside_window"
                 break
             offset += len(items)
-        info = {"pages": pages, "empty_reason": empty_reason, "api_code": api_code if pages else 0}
+        if (
+            not more_in_window
+            and max_articles > 0
+            and len(collected) >= max_articles
+            and last_page_full
+            and empty_reason == "exhausted"
+        ):
+            oldest = min(
+                (article["update_time"] for article in collected if article["update_time"]),
+                default=0,
+            )
+            if not cutoff_epoch or (oldest and oldest >= cutoff_epoch):
+                more_in_window = True
+                empty_reason = "limit_reached"
+        info = {
+            "pages": pages,
+            "empty_reason": empty_reason,
+            "api_code": api_code if pages else 0,
+            "more_in_window": more_in_window,
+        }
         return collected, info
 
     @staticmethod
