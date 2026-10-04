@@ -455,7 +455,13 @@ def _daily_next_action(config: dict[str, Any]) -> str:
 def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     """Preview without side effects; --yes executes within the approved scope."""
     from article_inbox import plan_digest
-    from discover_only import _subscription_cooldown_active, discover_articles
+    from discover_only import (
+        _subscription_cooldown_active,
+        discover_articles,
+        expire_stale_pending,
+        pending_expiry_hours,
+        retry_uncrawled_bodies,
+    )
 
     config = load_config()
 
@@ -504,6 +510,7 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     if not arguments.yes:
         return plan, _daily_next_action(config)
 
+    expired_pending = expire_stale_pending(pending_expiry_hours(config))
     diagnostics: list[dict] = []
     queued = 0
 
@@ -522,9 +529,14 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     )
     preferences = config["preferences"]
     digest = plan_digest(preferences, hours=preferences["digest_hours"], limit=preferences["digest_limit"])
+    body_retry = retry_uncrawled_bodies(
+        config["redfox"]["api_key"], config["settings"]["request_delay"]
+    )
     plan["run"] = {
         "discovered": len(discovered),
         "queued": queued,
+        "expired_pending": expired_pending,
+        "body_retry": body_retry,
         "accounts": diagnostics,
         "digest_candidates": digest["candidates"],
     }

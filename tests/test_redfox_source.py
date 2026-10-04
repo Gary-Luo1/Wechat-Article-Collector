@@ -672,6 +672,56 @@ def test_read_failure_wrapped_for_protocol(isolated_home, monkeypatch):
     assert "rate limited" in str(exc_info.value)
 
 
+def test_uncrawled_body_is_marked_and_retried_later(isolated_home, monkeypatch):
+    import process_pending
+    from config_store import save_config
+    from discover_only import retry_uncrawled_bodies
+    from queue_helpers import get_pending
+
+    save_config(_config())
+    add_pending(
+        [
+            {
+                "title": "t",
+                "link": "https://mp.weixin.qq.com/s?__biz=1&mid=1&idx=1&sn=crawl1",
+                "account": "a",
+                "content_source": "redfox",
+                "work_uuid": "U-UNCRAWLED",
+            }
+        ]
+    )
+
+    class _Uncrawled:
+        def query_work(self, work_uuid):
+            return {}, 3203
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("redfox_client.RedfoxClient", lambda *a, **k: _Uncrawled())
+    with pytest.raises(ValueError, match="not crawled"):
+        process_pending._print_article(get_pending()[0])
+    assert get_pending()[0]["body_status"] == "uncrawled"
+
+    class _Ready:
+        def __init__(self, api_key, request_delay=0):
+            pass
+
+        def query_work(self, work_uuid):
+            return {"content": "现在有正文"}, 2000
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("redfox_client.RedfoxClient", _Ready)
+    summary = retry_uncrawled_bodies("k", 0)
+    assert summary == {"retried": 1, "ready": 1, "still_uncrawled": 0}
+    saved = get_pending()[0]
+    assert saved["content"] == "现在有正文"
+    assert "body_status" not in saved
+    assert "read_state" not in saved
+
+
 def test_uncrawled_article_gets_specific_guidance(isolated_home, monkeypatch):
     import process_pending
     from config_store import save_config

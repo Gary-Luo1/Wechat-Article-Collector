@@ -283,6 +283,32 @@ class TestQueue:
         assert add_pending([first, second], content_dedup=True) == 1
         assert len(get_pending()) == 1
 
+    def test_stale_pending_expires_without_dropping_saved_items(self):
+        from datetime import datetime, timedelta, timezone
+
+        from paths import queue_path, secure_write_json
+        from queue_helpers import add_pending, expire_stale_pending, get_pending, read_queue
+
+        fresh = article("fresh")
+        stale = article("stale")
+        starred = article("starred")
+        starred["favorite"] = True
+        later = article("later")
+        later["inbox_state"] = "later"
+        add_pending([fresh, stale, starred, later])
+        data = read_queue()
+        old = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
+        for item in data["pending"]:
+            if item["title"] == "Article stale":
+                item["discovered_at"] = old
+        secure_write_json(queue_path(), data)
+        assert expire_stale_pending(48) == 1
+        assert {item["title"] for item in get_pending()} == {
+            "Article fresh",
+            "Article starred",
+            "Article later",
+        }
+
     def test_content_dedup_collapses_the_same_story_across_accounts(self):
         from config_store import DEFAULT_CONFIG
         from queue_helpers import add_pending, get_pending

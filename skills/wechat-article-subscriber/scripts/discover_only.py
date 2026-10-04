@@ -12,7 +12,15 @@ from pathlib import Path
 
 from config_store import ConfigError, load_config, modify_config
 from protocol import dump, failure, success
-from queue_helpers import add_pending, cleanup_processed, read_queue
+from queue_helpers import (
+    add_pending,
+    cache_pending_body,
+    cleanup_processed,
+    expire_stale_pending,
+    get_pending,
+    mark_body_status,
+    read_queue,
+)
 from redfox_client import RedfoxAPIError, RedfoxAuthError, RedfoxClient
 
 
@@ -22,6 +30,7 @@ logger = logging.getLogger("wechat-discover")
 # fetches the next batch and leaves the cooldown unarmed. After this many
 # partial passes the cooldown is armed anyway so a full feed cannot bill forever.
 PARTIAL_DISCOVERY_LIMIT = 3
+UNCRAWLED_RETRY_LIMIT = 20
 
 
 def _subscription_cooldown_active(
@@ -134,6 +143,46 @@ def _partial_runs(subscription: dict) -> int:
         return max(0, int(raw))
     except (TypeError, ValueError):
         return 0
+
+
+def pending_expiry_hours(config: dict) -> float:
+    """Keep unread leftovers for two lookback windows, and at least 48 hours."""
+    window = max(
+        float(config["settings"]["check_hours"]),
+        float(config["preferences"]["digest_hours"]),
+    )
+    return max(window * 2, 48)
+
+
+def retry_uncrawled_bodies(api_key: str, request_delay: float) -> dict[str, int]:
+    """Retry pending bodies the library had not crawled. Code 3203 is unpaid."""
+    from redfox_client import RedfoxClient, clean_content
+
+    summary = {"retried": 0, "ready": 0, "still_uncrawled": 0}
+    targets = [
+        article
+        for article in get_pending()
+        if article.get("body_status") == "uncrawled"
+        and not str(article.get("content") or "").strip()
+        and str(article.get("work_uuid") or "").strip()
+    ][:UNCRAWLED_RETRY_LIMIT]
+    if not targets or not str(api_key or "").strip():
+        return summary
+    client = RedfoxClient(str(api_key).strip(), request_delay=float(request_delay))
+    try:
+        for article in targets:
+            summary["retried"] += 1
+            detail, api_code = client.query_work(str(article["work_uuid"]))
+            text = clean_content(detail.get("content"))
+            if text and cache_pending_body(str(article["link"]), text):
+                summary["ready"] += 1
+            elif api_code == 3203:
+                summary["still_uncrawled"] += 1
+            else:
+                mark_body_status(str(article["link"]), "unavailable")
+    finally:
+        client.close()
+    return summary
 
 
 def discover_articles(
@@ -338,6 +387,7 @@ def main(argv: list[str] | None = None) -> int:
         if not config["subscriptions"]:
             raise ConfigError("no subscriptions configured")
         hours = arguments.hours or float(config["settings"]["check_hours"])
+        expired_pending = expire_stale_pending(pending_expiry_hours(config))
 
         def persist_account(articles: list[dict]) -> int:
             nonlocal queued
@@ -357,11 +407,16 @@ def main(argv: list[str] | None = None) -> int:
             force=arguments.force,
         )
         cleanup_processed()
+        body_retry = retry_uncrawled_bodies(
+            config["redfox"]["api_key"], config["settings"]["request_delay"]
+        )
         data = {
             "hours": hours,
             "forced": bool(arguments.force),
             "discovered": len(articles),
             "queued": queued,
+            "expired_pending": expired_pending,
+            "body_retry": body_retry,
             "accounts": diagnostics,
         }
         truncated_open = any(

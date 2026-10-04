@@ -184,6 +184,8 @@ def _validate_article(article: Any, location: str) -> None:
         fingerprint = read_state.get("content_sha256")
         if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
             raise ValueError(f"{location}.read_state.content_sha256 must be a SHA-256 hex digest")
+    if "body_status" in article and article["body_status"] not in {"uncrawled", "unavailable"}:
+        raise ValueError(f"{location}.body_status must be uncrawled or unavailable")
 
 
 def _read_unlocked() -> dict[str, Any]:
@@ -525,6 +527,90 @@ def pending_sync_entries() -> list[dict[str, Any]]:
         for entry in data["processed"].values()
         if isinstance(entry, dict) and entry.get("sync_status") == "pending"
     ]
+
+
+def _article_age_seconds(article: dict[str, Any]) -> float | None:
+    raw = str(article.get("discovered_at") or "").strip()
+    if raw:
+        try:
+            stamp = datetime.fromisoformat(raw)
+        except ValueError:
+            stamp = None
+        if stamp is not None:
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - stamp).total_seconds()
+    try:
+        published = float(article.get("update_time") or 0)
+    except (TypeError, ValueError):
+        return None
+    if published <= 0:
+        return None
+    return time.time() - published
+
+
+def expire_stale_pending(max_age_hours: float) -> int:
+    """Drop active, unstarred pending articles older than ``max_age_hours``.
+
+    Favorites and later-reading items stay. Articles with no usable timestamp
+    stay. Processed history is untouched.
+    """
+    if not isinstance(max_age_hours, (int, float)) or isinstance(max_age_hours, bool):
+        raise ValueError("max_age_hours must be numeric")
+    if max_age_hours <= 0:
+        raise ValueError("max_age_hours must be positive")
+    cutoff = float(max_age_hours) * 3600
+    with queue_lock():
+        data = _read_unlocked()
+        kept: list[dict[str, Any]] = []
+        removed = 0
+        for article in data["pending"]:
+            if article.get("favorite") or article.get("inbox_state") == "later":
+                kept.append(article)
+                continue
+            age = _article_age_seconds(article)
+            if age is not None and age > cutoff:
+                removed += 1
+                continue
+            kept.append(article)
+        if removed:
+            data["pending"] = kept
+            _write_unlocked(data)
+        return removed
+
+
+def mark_body_status(link: str, status: str) -> None:
+    """Remember that a pending article's body could not be fetched yet."""
+    if status not in {"uncrawled", "unavailable"}:
+        raise ValueError("body status must be uncrawled or unavailable")
+    normalized = normalize_url(link)
+    with queue_lock():
+        data = _read_unlocked()
+        article = _find_pending(data, normalized)
+        if article is None or str(article.get("content") or "").strip():
+            return
+        article["body_status"] = status
+        _write_unlocked(data)
+
+
+def cache_pending_body(link: str, text: str) -> bool:
+    """Store a recovered body without marking the article as read."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("article text must be non-empty")
+    normalized = normalize_url(link)
+    with queue_lock():
+        data = _read_unlocked()
+        article = _find_pending(data, normalized)
+        if article is None:
+            return False
+        if str(article.get("content") or "").strip():
+            article.pop("body_status", None)
+            _write_unlocked(data)
+            return False
+        article["content"] = text
+        article.pop("body_status", None)
+        _write_unlocked(data)
+        return True
 
 
 def cleanup_processed(max_age_days: int = MAX_PROCESSED_AGE_DAYS) -> int:

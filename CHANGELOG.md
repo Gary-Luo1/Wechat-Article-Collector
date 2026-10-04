@@ -44,6 +44,11 @@
   discovery reports `本号还有文章没拉完` and does not arm the cooldown. The next
   pass skips links already queued. After three partial passes the cooldown is
   armed so a busy feed cannot bill without limit.
+- Active, unstarred pending articles older than two lookback windows (at least
+  48 hours) are dropped on discovery. Favorites and later-reading items stay.
+  `process clean` also drops pending articles older than `--days`.
+- A body the library has not crawled is marked `uncrawled` and retried on the
+  next discovery. Recovered text is cached for the later read.
 
 ### Changed (runtime-cost and queue-size optimization)
 

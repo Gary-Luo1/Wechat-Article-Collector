@@ -35,9 +35,11 @@ from protocol import dump, failure, success
 from queue_helpers import (
     cleanup_processed,
     dismiss_article,
+    expire_stale_pending,
     export_queue,
     get_pending,
     is_content_truncated,
+    mark_body_status,
     normalize_url,
     pending_sync_entries,
     read_queue,
@@ -306,9 +308,10 @@ def _load_article_text(
             client.close()
     if not text:
         if api_code == 3203:
+            mark_body_status(str(article["link"]), "uncrawled")
             raise ValueError(
                 "the redfox library has not crawled this article's body yet; "
-                "retry after a later sync cycle or dismiss it"
+                "the next discovery retries this body, or dismiss it"
             )
         raise ValueError(
             "redfox returned no content for this article; dismiss it or contact "
@@ -659,7 +662,12 @@ def _dispatch(arguments: argparse.Namespace) -> int:
         print(export_queue(arguments.path))
         return 0
     if arguments.command == "clean":
-        print(f"Removed {cleanup_processed(arguments.days)} old records")
+        removed_processed = cleanup_processed(arguments.days)
+        removed_pending = expire_stale_pending(arguments.days * 24)
+        print(
+            f"Removed {removed_processed} old processed records "
+            f"and {removed_pending} stale pending articles"
+        )
         return 0
     return 1
 
