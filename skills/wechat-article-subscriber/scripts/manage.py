@@ -637,15 +637,26 @@ def _next_step() -> tuple[dict[str, Any], str]:
             False,
         ),
         "feishu_cli_incompatible": ("lark-cli 版本不兼容，需要安装受支持版本。", "manage feishu-setup", False),
+        "feishu_app_missing": (
+            "请提供飞书应用的 App ID（或按引导去开放平台创建一个新应用）。",
+            "manage feishu-app --app-id <APP_ID>",
+            False,
+        ),
+        "feishu_profile_missing": (
+            "确认将该应用导入技能的私有配置？",
+            "manage feishu-local-profile import --yes",
+            False,
+        ),
         "feishu_secret_missing": (
-            "bot 身份需要应用的 App Secret：Agent 会创建并打开一个本地密钥文件，把开放平台应用『凭证与基础信息』里的 App Secret 粘贴进去保存即可（不经过聊天，也不需要运行命令）。",
+            "应用已绑定，但私有配置里还没有 App Secret。准备一次性本地收件文件，把开放平台『凭证与基础信息』里的 App Secret 写成一行；读入后文件会删除。不要把 Secret 发在对话里。",
             _secret_file_command(),
             False,
         ),
-        "feishu_authorization_required": ("需要一次飞书扫码授权（最小权限）。",
-            "manage feishu-setup", False),
-        "feishu_authorization_waiting": ("上一次扫码授权还在等待：请完成页面确认或重新发起。",
-            "manage feishu-setup", False),
+        "feishu_authorization_required": ("需要一次飞书扫码授权（最小权限）。过期的等待会被 start 换成新链接。",
+            "manage feishu-auth start", False),
+        "feishu_authorization_waiting": (
+            "上一次扫码授权还在有效期内：请完成页面确认。过期后再次 manage feishu-auth start 会直接发出新链接。",
+            "manage feishu-auth start", False),
         "feishu_manager_missing": (
             "bot 模式需要一位接收管理权限的飞书用户：优先用曾授权的个人身份导入（免输入），否则提供 Open ID。",
             "manage feishu-manager --from-authorized-user（或 --open-id <OPEN_ID>）",
@@ -695,6 +706,24 @@ def _next_step() -> tuple[dict[str, Any], str]:
     question, command, paid = questions.get(
         stage, (None, "manage status", False)
     )
+    if stage == "execution_policy_unconfirmed":
+        destination = config["feishu"]["destination"]
+        if destination == "existing":
+            question = (
+                "最后一步：一次性确认以后是否自动同步飞书。"
+                "当次达标文章用 sync-feishu --qualified 写入，不依赖这一步。"
+            )
+            command = (
+                "manage execution-policy set --mode autopilot "
+                "--feishu-provisioning deny --feishu-sync allow"
+                "（预览后加 --yes；已有表格不要允许新建）"
+            )
+        elif destination == "skip":
+            command = (
+                "manage execution-policy set --mode autopilot "
+                "--feishu-provisioning deny --feishu-sync deny"
+                "（预览后加 --yes）"
+            )
     # `paid` is always boolean for the envelope contract; a string entry is a
     # human-facing billing note carried separately.
     paid_note = paid if isinstance(paid, str) else ""
@@ -1226,6 +1255,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="create the restricted local secret file for the user to paste into",
     )
     app_secret.add_argument(
+        "--prepare-inbox",
+        action="store_true",
+        help="create a one-time 0600 inbox for the App Secret (remote agents)",
+    )
+    app_secret.add_argument(
         "--open-secret-file",
         action="store_true",
         help="open the prepared secret file with the default editor",
@@ -1235,6 +1269,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         default="",
         help="consume the prepared secret file (scoped, single-line, deleted after read)",
+    )
+    app_secret.add_argument(
+        "--inbox",
+        metavar="PATH",
+        default="",
+        help="consume a prepared one-time App Secret inbox and delete it",
     )
     daily = commands.add_parser("daily")
     daily.add_argument(

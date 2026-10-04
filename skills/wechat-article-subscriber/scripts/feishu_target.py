@@ -27,7 +27,11 @@ class FeishuTarget:
 
     def check(self) -> dict[str, Any]:
         """Verify CLI compatibility, identity, permissions, and field mapping."""
-        if not self._feishu.get("enabled"):
+        enabled = bool(self._feishu.get("enabled"))
+        has_target = bool(str(self._feishu.get("base_token") or "").strip()) and bool(
+            str(self._feishu.get("table_id") or "").strip()
+        )
+        if not enabled and not has_target:
             raise LarkCLIError(
                 "Feishu sync is disabled; complete Agent setup first", kind="config"
             )
@@ -37,7 +41,13 @@ class FeishuTarget:
                 f"lark-cli {cli.get('version', 'unknown')} is outside the supported range >=1.0.69,<2",
                 kind="version",
             )
-        return self._preflight(self._feishu)
+        if enabled:
+            return self._preflight(self._feishu)
+        # A remembered URL is not writable until feishu-check saves the mapping.
+        try:
+            return self._preflight(self._feishu, allow_disabled=True)
+        except TypeError:
+            return self._preflight(self._feishu)
 
     def sync(
         self,

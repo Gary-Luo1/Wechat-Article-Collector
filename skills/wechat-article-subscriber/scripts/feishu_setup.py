@@ -10,7 +10,12 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
+
+# Device login links from lark-cli expire after this many seconds. A waiting
+# flow older than the TTL is replaced by the next `feishu-auth start`.
+DEVICE_AUTHORIZATION_TTL_SECONDS = 600
 
 from config_transitions import transition
 from lark_profile_store import profile_name_for_app
@@ -45,10 +50,19 @@ def stage_facts(
         "feishu_identity_confirmed": bool(config["setup"]["feishu_identity_confirmed"]),
         "feishu_identity": str(feishu["identity"]),
         "app_bound": bool(str(feishu.get("expected_app_id") or "").strip()),
+        "cli_profile": str(feishu.get("cli_profile") or "").strip(),
+        "binding_mode": str(feishu.get("binding_mode") or ""),
         "cli_checked": cli is not None,
         "cli_compatible": bool(cli.get("compatible")) if isinstance(cli, dict) else False,
         "bot_secret_missing": (
             feishu["identity"] == "bot"
+            and bool(str(feishu.get("expected_app_id") or "").strip())
+            and str(feishu.get("binding_mode") or "") != "agent"
+            and isinstance(profile_secret, dict)
+            and profile_secret.get("ready") is False
+        ),
+        "user_secret_missing": (
+            feishu["identity"] == "user"
             and bool(str(feishu.get("expected_app_id") or "").strip())
             and str(feishu.get("binding_mode") or "") != "agent"
             and isinstance(profile_secret, dict)
@@ -61,6 +75,23 @@ def stage_facts(
         "feishu_failed": bool(config["health"]["feishu"]["consecutive_failures"]),
         "feishu_unverified": not bool(config["health"]["feishu"]["last_verified_at"]),
     }
+
+
+def authorization_expired(authorization: dict[str, Any]) -> bool:
+    """Return whether a waiting device flow is past the lark-cli link TTL."""
+    if str(authorization.get("state") or "") != "waiting":
+        return False
+    raw = str(authorization.get("started_at") or "").strip()
+    if not raw:
+        return False
+    try:
+        started = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    return elapsed >= DEVICE_AUTHORIZATION_TTL_SECONDS
 
 
 def detect_agent_source() -> str:
@@ -222,9 +253,9 @@ def setup_status(
     if facts["bot_secret_missing"]:
         state.update(
             next_question=(
-                "bot 身份需要应用的 App Secret 才能调用飞书 API：Agent 会创建并打开"
-                "一个本地密钥文件，把开放平台应用『凭证与基础信息』里的 App Secret "
-                "粘贴进去保存即可（不经过聊天，也不需要运行命令）。"
+                "bot 身份需要应用的 App Secret 才能调用飞书 API。准备一次性本地收件文件，"
+                "把开放平台『凭证与基础信息』里的 App Secret 写成一行；读入后文件会删除。"
+                "不要把 Secret 发在对话里，也不要写进命令。"
             ),
             next_command=secret_command,
             create_app_guide=guide,
@@ -251,24 +282,43 @@ def setup_status(
             ),
         )
         return state, "resolve_and_save_feishu_manager"
-    if facts["feishu_identity"] == "user" and facts["authorization_state"] == "waiting":
-        state.update(
-            next_question="上一次扫码授权还在等待确认：请完成页面确认；过期就重新发起。",
-            next_command="manage feishu-auth start（完成后 feishu-auth complete）",
-        )
-        return state, "resume_existing_user_base_authorization"
-    if facts["feishu_identity"] == "user" and facts["authorization_state"] != "authorized":
+    user_needs_secret = (
+        facts["feishu_identity"] == "user"
+        and facts["authorization_state"] != "authorized"
+        and not secret_state.get("ready")
+    )
+    if user_needs_secret:
         state.update(
             next_question=(
-                "应用已绑定但密钥/授权未就绪：Agent 会创建并打开一个本地密钥文件，"
-                "把『凭证与基础信息』里的 App Secret 粘贴进去保存（不经过聊天）；"
-                "随后完成一次扫码授权。"
+                "应用已绑定，但私有配置里还没有 App Secret。准备一次性本地收件文件，"
+                "把『凭证与基础信息』里的 App Secret 写成一行；读入后文件会删除。"
+                "不要把 Secret 发在对话里，也不要写进命令。"
             ),
             next_command=secret_command,
             then="manage feishu-auth start（扫码后 feishu-auth complete）",
             create_app_guide=guide,
         )
         return state, "provide_app_secret_for_private_profile"
+    authorization = config["setup"]["feishu_authorization"]
+    if (
+        facts["feishu_identity"] == "user"
+        and facts["authorization_state"] == "waiting"
+        and not authorization_expired(authorization)
+    ):
+        state.update(
+            next_question=(
+                "上一次扫码授权还在有效期内：请完成页面确认。"
+                "链接过期后，再次 manage feishu-auth start 会直接发出新链接。"
+            ),
+            next_command="manage feishu-auth start（完成后 feishu-auth complete）",
+        )
+        return state, "resume_existing_user_base_authorization"
+    if facts["feishu_identity"] == "user" and facts["authorization_state"] != "authorized":
+        state.update(
+            next_question="需要一次飞书扫码授权（最小权限）。过期的等待会被 start 换成新链接。",
+            next_command="manage feishu-auth start（扫码后 feishu-auth complete）",
+        )
+        return state, "run_feishu_auth_start"
     if state["destination"] == "undecided":
         state.update(
             next_question=(
@@ -306,10 +356,35 @@ def setup_status(
         return state, "provision_configured_feishu_base"
     if not state["target_configured"] and state["destination"] == "existing":
         state.update(
-            next_question="请提供目标表格的链接（先只读校验字段，再保存映射）。",
+            next_question="请提供目标表格的链接。字段暂时读不到时也会先记下这张表，授权后再校验。",
             next_command="manage feishu-target --url <表格链接>",
         )
         return state, "configure_existing_feishu_target"
+    if facts["feishu_failed"]:
+        state.update(
+            next_question="飞书只读校验失败：按返回的原因修复后重新校验。",
+            next_command="process feishu-check --save-mapping",
+        )
+        return state, "authorize_and_run_feishu_check"
+    if not feishu.get("field_mapping") or not config["health"]["feishu"]["last_verified_at"]:
+        state.update(
+            next_question="表格已经记下，还需要一次只读字段校验，通过后才允许写入。",
+            next_command="process feishu-check --save-mapping",
+        )
+        return state, "authorize_and_run_feishu_check"
+    if not facts["policy_confirmed"]:
+        state.update(
+            next_question=(
+                "最后一步：一次性确认以后是否自动同步飞书。"
+                "当次达标文章用 sync-feishu --qualified 写入，不依赖这一步。"
+            ),
+            next_command=(
+                "manage execution-policy set --mode autopilot "
+                "--feishu-provisioning deny --feishu-sync allow"
+                "（预览后加 --yes；已有表格不要允许新建）"
+            ),
+        )
+        return state, "review_and_confirm_execution_policy"
     state.update(next_question=None, next_command="manage doctor --online（最终校验）")
     return state, "run_feishu_validation"
 
@@ -338,10 +413,15 @@ def next_stage(config: dict[str, Any], *, cli: dict[str, Any] | None = None) -> 
         return "feishu_cli_missing_or_unchecked", "ask_user_for_feishu_setup_choice"
     if not facts["cli_compatible"]:
         return "feishu_cli_incompatible", "install_compatible_lark_cli"
-    if facts["bot_secret_missing"]:
+    if not facts["app_bound"]:
+        return "feishu_app_missing", "select_feishu_app"
+    if facts["binding_mode"] != "agent" and not facts["cli_profile"]:
+        return "feishu_profile_missing", "reuse_or_configure_private_lark_profile"
+    if facts["bot_secret_missing"] or facts["user_secret_missing"]:
         return "feishu_secret_missing", "provide_app_secret_for_private_profile"
     if facts["feishu_identity"] == "user" and facts["authorization_state"] != "authorized":
-        if facts["authorization_state"] == "waiting":
+        authorization = config["setup"]["feishu_authorization"]
+        if facts["authorization_state"] == "waiting" and not authorization_expired(authorization):
             return "feishu_authorization_waiting", "resume_existing_user_base_authorization"
         return "feishu_authorization_required", "run_feishu_auth_start"
     if facts["bot_manager_missing"]:

@@ -55,7 +55,7 @@ article bodies, mark articles complete, or write Feishu.
   operations while the policy and target remain unchanged. Provisioning approval is
   one-shot and is consumed after successful creation.
 - Require an explicit `user` or `bot` identity choice before authorization or provisioning. Never silently fall back or switch identities.
-- For `user`, reuse a ready authorization. If none exists, start one minimum `base` authorization flow and resume that same device code; do not start another flow after authorization succeeds.
+- For `user`, reuse a ready authorization. If none exists, start one minimum `base` authorization flow and resume that same device code while the link is inside its 10-minute TTL. A waiting flow older than that TTL is replaced by the next `feishu-auth start`. Do not start another flow after authorization succeeds.
 - For `bot`, never run user authorization. Use only the configured bot credentials and backend scopes.
 - Persist only the authorization state (`not_started`, `waiting`, `authorized`,
   `expired`, `failed`, or `not_required`), selected identity, and timestamps. Never persist
@@ -72,7 +72,7 @@ article bodies, mark articles complete, or write Feishu.
   Base/table names may be approved in the front-loaded policy; any mismatch or schema
   extension requires a new preview and confirmation.
 - Resolve an existing table's real fields first and persist field IDs. Never auto-create missing fields or write formula, lookup, system, unsupported, or attachment fields as ordinary values.
-- Prefer `sync-feishu --all --dry-run` for a new table.
+- Prefer `sync-feishu --qualified --dry-run` before the first explicit write. `sync-feishu --all` is the later automatic path and requires an approved policy.
 - Use URL-based record lookup and upsert.
 - Keep failed writes in the local outbox and retry; do not mark them synced optimistically.
 - Inbox mark, dismiss, and restore are local-only operations. Dismiss is reversible and must not be presented as deletion or external removal.

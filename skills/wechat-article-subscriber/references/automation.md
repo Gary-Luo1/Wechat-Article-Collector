@@ -45,8 +45,11 @@ Require `runtime.supported`, installed dependencies, a valid redfox key and heal
 
 For recurring Feishu sync, include the exact destination and recurring-write scope
 in `manage execution-policy set`, confirm it once, and use `process --format json
-sync-feishu --all`. A dry run remains useful for a newly mapped table but is not a
-second approval gate. Pending entries remain queued until a confirmed successful
-write.
+sync-feishu --all`. That command refuses to run until the policy allows Feishu
+sync, and it still skips advertisements and scores below `min_score`. The current
+explicit write, including articles scored before the policy existed, is
+`sync-feishu --qualified`. A dry run remains useful for a newly mapped table but
+is not a second approval gate. Pending entries remain queued until a confirmed
+successful write.
 
 To stop automation, disable/delete the scheduler entry first. `manage feishu-disable --yes` stops future Skill sync but does not modify an external scheduler or delete Base data.

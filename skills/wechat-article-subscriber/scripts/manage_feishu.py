@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from execution_policy import (
     policy_for,
 )
 from feishu_setup import (
+    authorization_expired,
     bind_agent_context,
     choose_app,
     choose_destination,
@@ -53,6 +55,7 @@ from paths import data_dir, open_with_default_app
 from protocol import _read_secret_stdin
 
 SECRET_FILE_NAME = "feishu-app-secret.txt"
+SECRET_INBOX_PREFIX = ".feishu-secret-"
 SECRET_FILE_PLACEHOLDER = "PASTE_APP_SECRET_HERE"
 SECRET_FILE_MAX_BYTES = 64 * 1024
 
@@ -296,12 +299,40 @@ def _parse_feishu_base_url(url: str) -> tuple[str, str]:
     return base_token, table_id
 
 
+def _remember_unreachable_target(config: dict[str, Any], base_token: str, table_id: str) -> str:
+    """Keep a user-supplied table URL when field verification cannot run yet."""
+    current = config["feishu"]
+    same_target = (
+        str(current.get("base_token") or "") == base_token
+        and str(current.get("table_id") or "") == table_id
+    )
+    if same_target and current.get("enabled"):
+        return "the saved table was left unchanged"
+    transition(
+        "feishu_target_remembered",
+        {"base_token": base_token, "table_id": table_id},
+    )
+    return (
+        "the table URL was saved; after authorization run "
+        "process feishu-check --save-mapping"
+    )
+
+
 def feishu_target(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     """Map an existing Base table by URL, verifying read access and fields."""
     base_token, table_id = _parse_feishu_base_url(arguments.url)
     config = load_config()
     identity = config["feishu"]["identity"]
-    fields = list_fields(base_token, table_id, identity=identity)
+    try:
+        fields = list_fields(base_token, table_id, identity=identity)
+    except LarkCLIError as exc:
+        remembered = _remember_unreachable_target(config, base_token, table_id)
+        raise LarkCLIError(
+            f"{exc} | {remembered}",
+            kind=exc.kind,
+            code=exc.code,
+            retryable=exc.retryable,
+        ) from exc
 
     saved = transition(
         "feishu_target", {"base_token": base_token, "table_id": table_id}
@@ -333,9 +364,9 @@ def _secret_file_path() -> Path:
 
 def _secret_file_command() -> str:
     return (
-        "manage feishu-app-secret --prepare-secret-file → manage feishu-app-secret "
-        "--open-secret-file（用户在打开的文件里粘贴并保存后）→ "
-        "manage feishu-app-secret --secret-file <PATH>"
+        "manage feishu-app-secret --prepare-inbox（把 App Secret 写成该文件的一行）→ "
+        "manage feishu-app-secret --inbox <PATH>；本机编辑器可用 "
+        "--prepare-secret-file → --open-secret-file → --secret-file <PATH>"
     )
 
 
@@ -371,6 +402,58 @@ def _prepare_secret_file() -> tuple[dict[str, Any], str]:
     }, "edit_then_consume_feishu_secret_file"
 
 
+def _prepare_secret_inbox() -> tuple[dict[str, Any], str]:
+    """Create a one-time 0600 inbox so a remote agent can store the secret off the command line."""
+    root = data_dir()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(
+            prefix=SECRET_INBOX_PREFIX,
+            suffix=".txt",
+            dir=root,
+        )
+        try:
+            if os.name != "nt":
+                os.fchmod(descriptor, 0o600)
+            os.write(descriptor, (SECRET_FILE_PLACEHOLDER + "\n").encode("utf-8"))
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise LarkCLIError(f"cannot prepare the App Secret inbox: {exc}") from exc
+    path = Path(name)
+    return {
+        "path": str(path),
+        "created": True,
+        "encrypted": False,
+        "protection": (
+            "plaintext one-time inbox protected by the current OS user account "
+            "permissions; consumed and deleted after one read"
+        ),
+        "contents_echoed": False,
+        "instructions": [
+            "把应用『凭证与基础信息』里的 App Secret 写成这一行，替换占位符。",
+            "不要把 Secret 发在对话里，也不要写进命令文本。",
+            "写好后告诉 Agent，由它用 --inbox 读入；文件读取后会被删除。",
+        ],
+        "consume_command": f"manage feishu-app-secret --inbox {path}",
+    }, "edit_then_consume_feishu_secret_file"
+
+
+def _scoped_secret_inbox(value: Path) -> Path:
+    candidate = Path(value).expanduser()
+    if candidate.is_symlink():
+        raise ConfigError("the App Secret inbox cannot be a symbolic link")
+    resolved = candidate.resolve()
+    if resolved.parent != data_dir().resolve():
+        raise ConfigError(
+            "the App Secret inbox must be the prepared file inside the application "
+            f"state directory ({data_dir()})"
+        )
+    if not resolved.name.startswith(SECRET_INBOX_PREFIX) or resolved.suffix != ".txt":
+        raise ConfigError("the App Secret inbox has an invalid name")
+    return resolved
+
+
 def _open_secret_file() -> tuple[dict[str, Any], str]:
     """Open the prepared secret file in the user's default editor."""
     path = _secret_file_path()
@@ -402,6 +485,15 @@ def _read_secret_file(value: Path) -> str:
             "the App Secret file must be the prepared file inside the application "
             f"state directory ({data_dir() / SECRET_FILE_NAME})"
         )
+    return _read_secret_text(resolved)
+
+
+def _read_secret_file_at(resolved: Path) -> str:
+    """Read one already-scoped secret file and delete it."""
+    return _read_secret_text(resolved)
+
+
+def _read_secret_text(resolved: Path) -> str:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -469,10 +561,14 @@ def feishu_app_secret(arguments: argparse.Namespace) -> tuple[dict[str, Any], st
         raise ConfigError("confirm Feishu identity before entering an App Secret")
     if arguments.prepare_secret_file:
         return _prepare_secret_file()
+    if getattr(arguments, "prepare_inbox", False):
+        return _prepare_secret_inbox()
     if arguments.open_secret_file:
         return _open_secret_file()
     if arguments.secret_file:
         secret = _read_secret_file(Path(arguments.secret_file))
+    elif getattr(arguments, "inbox", ""):
+        secret = _read_secret_file_at(_scoped_secret_inbox(Path(arguments.inbox)))
     else:
         secret = _read_secret_stdin("the Feishu App Secret")
     if not secret:
@@ -840,12 +936,16 @@ def feishu_auth(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             "user_authorization_started": False,
         }, "configure_bot_credentials_and_scopes_without_user_auth"
     if arguments.auth_command == "start":
-        if authorization["state"] == "waiting":
+        if authorization["state"] == "waiting" and not authorization_expired(authorization):
             return {
                 "identity": identity,
                 "authorization": dict(authorization),
                 "new_authorization_started": False,
             }, "resume_existing_user_base_authorization"
+        if authorization["state"] == "waiting" and authorization_expired(authorization):
+            _save_authorization_state("expired")
+            config = load_config()
+            authorization = _authorization(config)
         context = feishu_identity_context(verify=True)
         if context.get("app_id_unambiguous") is False:
             return {

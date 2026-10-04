@@ -568,14 +568,11 @@ def _payload_error(payload: dict[str, Any], args: list[str]) -> LarkCLIError:
             code=code,
         )
     if "not configured" in lower or error_type == "not_configured":
-        # lark-cli reports a bare "not configured" when the pinned profile has
-        # no usable App credential; name the Skill-level fix explicitly so the
-        # dialogue can recover instead of dead-ending.
+        # lark-cli reports a bare "not configured" for several different gaps.
+        # Name the one that is actually missing so the wizard does not ask for
+        # an App Secret before an App ID, or for a secret that is already stored.
         return LarkCLIError(
-            "the isolated lark-cli profile has no usable credentials for the bound "
-            "App ID; run `manage feishu-app-secret --prepare-secret-file`, then "
-            "`--open-secret-file`, enter the secret locally and consume it with "
-            "`manage feishu-app-secret --secret-file <PATH>` (bot identity needs no OAuth) and retry",
+            _not_configured_guidance(),
             kind="config",
             code=code,
         )
@@ -719,6 +716,46 @@ def run_agent_lark(arguments: list[str]) -> tuple[int, bool, str, str]:
         stdout = _redact_cli_error(stdout, safe_args)
         stderr = _redact_cli_error(stderr, safe_args)
     return result.returncode, global_unchanged, stdout, stderr
+
+
+def _not_configured_guidance() -> str:
+    """Map lark-cli 'not configured' onto the missing Feishu setup step."""
+    try:
+        from config_store import ConfigError, load_config
+
+        config = load_config()
+    except (ConfigError, OSError, ValueError):
+        return (
+            "no Feishu App ID is bound; run `manage feishu-app --app-id <APP_ID>` "
+            "before retrying"
+        )
+    feishu = config["feishu"]
+    app_id = str(feishu.get("expected_app_id") or "").strip()
+    if not app_id:
+        return (
+            "no Feishu App ID is bound; run `manage feishu-app --app-id <APP_ID>` "
+            "before retrying"
+        )
+    secret = private_profile_secret_state()
+    if not secret.get("ready"):
+        return (
+            "the isolated profile for the bound App ID has no App Secret; run "
+            "`manage feishu-app-secret --prepare-inbox` and consume it with "
+            "`--inbox <PATH>` (or `--prepare-secret-file` / `--open-secret-file` / "
+            "`--secret-file <PATH>` on a machine with an editor)"
+        )
+    identity = str(feishu.get("identity") or "")
+    auth_state = str(config["setup"]["feishu_authorization"].get("state") or "")
+    if identity == "user" and auth_state != "authorized":
+        return (
+            "the App Secret is stored, but user authorization is missing; run "
+            "`manage feishu-auth start`"
+        )
+    return (
+        "the isolated lark-cli profile has no usable credentials for the bound "
+        "App ID; run `manage feishu-app-secret --prepare-inbox` and consume it "
+        "with `--inbox <PATH>`"
+    )
 
 
 def _append_secret_hint(message: str) -> str:

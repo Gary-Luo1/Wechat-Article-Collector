@@ -1029,9 +1029,20 @@ class TestProcess:
 
     def test_sync_all_reuses_one_preflight_for_the_batch(self):
         import process_pending
+        from config_store import load_config, save_config
         from queue_helpers import add_pending, complete_article, pending_sync_entries
 
         self.valid_config(feishu=True)
+        saved = load_config()
+        saved["setup"]["execution_policy"].update(
+            {
+                "confirmed": True,
+                "mode": "autopilot",
+                "allow_feishu_sync": True,
+                "approved_at": "2026-01-01T00:00:00+00:00",
+            }
+        )
+        save_config(saved)
         add_pending([article("a"), article("b")])
         for item in (article("a"), article("b")):
             complete_article(item["link"], {"score": 8}, sync_status="pending")

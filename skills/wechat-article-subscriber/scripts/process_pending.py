@@ -50,7 +50,7 @@ from queue_helpers import (
     update_inbox_item,
     update_sync_status,
 )
-from scoring_rubric import is_advertisement
+from scoring_rubric import is_advertisement, should_sync
 
 logger = logging.getLogger("wechat-process")
 
@@ -447,25 +447,104 @@ def cmd_done(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_sync_all(*, dry_run: bool = False, link: str | None = None) -> int:
+def _sync_block_reason(
+    metadata: dict[str, Any], config: dict[str, Any], *, force: bool
+) -> str | None:
+    """Return why this scored entry must not be written, or None when it may."""
+    if metadata.get("ad") is True:
+        return "advertisement records are not synced"
+    disposition = metadata.get("disposition")
+    if disposition in {"dismissed", "legacy_unreadable"}:
+        return (
+            f"this entry is {disposition} and has no score/summary to sync; "
+            "restore it and complete it properly first"
+        )
+    score = metadata.get("score")
+    try:
+        numeric = float(score)
+    except (TypeError, ValueError):
+        return "this entry has no score to sync"
+    minimum = config["settings"]["min_score"]
+    if not force and not should_sync(numeric, minimum):
+        return (
+            f"score {numeric} is below the threshold ({minimum}); "
+            "pass --force on sync-feishu --link to write this one article"
+        )
+    return None
+
+
+def _mark_pending_for_sync(entry: dict[str, Any], *, dry_run: bool) -> None:
+    if dry_run or entry.get("sync_status") == "pending":
+        return
+    link = str((entry.get("article") or {}).get("link") or "")
     if link:
+        update_sync_status(link, "pending")
+
+
+def cmd_sync_all(
+    *,
+    dry_run: bool = False,
+    link: str | None = None,
+    qualified: bool = False,
+    force: bool = False,
+) -> int:
+    config = load_config()
+    if link:
+        if force and qualified:
+            raise ValueError("--force applies only to sync-feishu --link")
         data = read_queue()
         entry = data["processed"].get(normalize_url(link))
         if not entry:
             raise LookupError("no processed article matches that URL")
-        disposition = (entry.get("metadata") or {}).get("disposition")
-        if disposition in {"dismissed", "legacy_unreadable"}:
-            raise ValueError(
-                f"this entry is {disposition} and has no score/summary to sync; "
-                "restore it and complete it properly first"
-            )
-        if not dry_run and entry.get("sync_status") != "pending":
-            update_sync_status(link, "pending")
+        reason = _sync_block_reason(entry.get("metadata") or {}, config, force=force)
+        if reason:
+            raise ValueError(reason)
+        _mark_pending_for_sync(entry, dry_run=dry_run)
         entries = [
             {"article": entry["article"], "metadata": entry.get("metadata", {})}
         ]
+    elif qualified:
+        if force:
+            raise ValueError("--force applies only to sync-feishu --link")
+        entries = []
+        already_synced = 0
+        for entry in read_queue()["processed"].values():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("sync_status") == "synced":
+                already_synced += 1
+                continue
+            if entry.get("sync_status") == "skipped_ad":
+                continue
+            reason = _sync_block_reason(entry.get("metadata") or {}, config, force=False)
+            if reason:
+                continue
+            _mark_pending_for_sync(entry, dry_run=dry_run)
+            entries.append(
+                {"article": entry["article"], "metadata": entry.get("metadata", {})}
+            )
+        if not entries:
+            print(
+                "No qualified articles are waiting for Feishu sync"
+                + (f" ({already_synced} already synced)" if already_synced else "")
+            )
+            return 0
     else:
-        entries = pending_sync_entries()
+        policy = autopilot_policy(config)
+        if policy is None or not policy.get("allow_feishu_sync"):
+            raise ValueError(
+                "sync-feishu --all writes the pending queue only after an approved "
+                "execution policy with Feishu sync allowed. For the articles just "
+                "scored, run sync-feishu --qualified"
+            )
+        entries = []
+        for entry in pending_sync_entries():
+            reason = _sync_block_reason(entry.get("metadata") or {}, config, force=False)
+            if reason:
+                title = _metadata_text((entry.get("article") or {}).get("title", ""), 512)
+                print(f"Skipped: {title}: {reason}")
+                continue
+            entries.append(entry)
     if not entries:
         print("No articles are waiting for Feishu sync")
         return 0
@@ -515,13 +594,15 @@ def cmd_feishu_check(*, save_mapping: bool = False) -> int:
                 "field_mapping": check["mapping"],
                 "mapping_saved": save_mapping,
                 "note": (
-                    "Read-only checks passed. Qualified writes may continue under the "
-                    "persisted execution policy."
+                    "Read-only checks passed. The approved execution policy may later "
+                    "sync qualified records with sync-feishu --all."
                     if autopilot_policy(config)
                     and config["setup"]["execution_policy"]["allow_feishu_sync"]
                     else (
-                        "Read-only checks passed. A real write requires current user "
-                        "authorization or an approved execution policy."
+                        "Read-only checks passed. This check does not write. "
+                        "sync-feishu --qualified writes the current qualified records. "
+                        "Later automatic sync needs an approved execution policy with "
+                        "Feishu sync allowed."
                     )
                 ),
             },
@@ -613,7 +694,17 @@ def build_parser() -> argparse.ArgumentParser:
     done_parser.add_argument("--dry-run", action="store_true")
     sync_parser = commands.add_parser("sync-feishu")
     sync_parser.add_argument("--all", action="store_true")
+    sync_parser.add_argument(
+        "--qualified",
+        action="store_true",
+        help="write every scored non-ad article at or above min_score; one preflight",
+    )
     sync_parser.add_argument("--link", default="", help="re-sync one processed article by URL")
+    sync_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="with --link, write one article that is below min_score",
+    )
     sync_parser.add_argument("--dry-run", action="store_true")
     check_parser = commands.add_parser("feishu-check")
     check_parser.add_argument("--save-mapping", action="store_true")
@@ -655,11 +746,17 @@ def _dispatch(arguments: argparse.Namespace) -> int:
             raise ValueError("provide an index or --link")
         return cmd_done(arguments)
     if arguments.command == "sync-feishu":
-        if arguments.all and arguments.link:
-            raise ValueError("choose either --all or --link <URL>, not both")
-        if not arguments.all and not arguments.link:
-            raise ValueError("choose --all or --link <URL>")
-        return cmd_sync_all(dry_run=arguments.dry_run, link=arguments.link or None)
+        modes = [arguments.all, arguments.qualified, bool(arguments.link)]
+        if sum(bool(mode) for mode in modes) != 1:
+            raise ValueError("choose one of --all, --qualified, or --link <URL>")
+        if arguments.force and not arguments.link:
+            raise ValueError("--force applies only to sync-feishu --link")
+        return cmd_sync_all(
+            dry_run=arguments.dry_run,
+            link=arguments.link or None,
+            qualified=arguments.qualified,
+            force=arguments.force,
+        )
     if arguments.command == "feishu-check":
         return cmd_feishu_check(save_mapping=arguments.save_mapping)
     if arguments.command == "feishu-schema":

@@ -1190,6 +1190,8 @@ def test_half_provisioned_base_requests_same_name_rerun(isolated_home):
     cfg["feishu"].update(
         {
             "identity": "bot",
+            "expected_app_id": "cli_example",
+            "cli_profile": "p1",
             "manager_open_id": "ou_m",
             "destination": "create",
             "provisioning": "created",

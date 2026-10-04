@@ -603,6 +603,36 @@ def _apply_domain_transition(
         state["changed"] = changed
         return config
 
+    if intent == "feishu_target_remembered":
+        if not isinstance(value, dict):
+            raise ConfigError("Feishu target must be an object")
+        base_token = str(value.get("base_token") or "").strip()
+        table_id = str(value.get("table_id") or "").strip()
+        if not base_token or not table_id:
+            raise ConfigError("Feishu target requires both a Base token and table ID")
+        previous = deepcopy(config["feishu"])
+        same_target = (
+            str(previous.get("base_token") or "") == base_token
+            and str(previous.get("table_id") or "") == table_id
+        )
+        config["feishu"].update(
+            {
+                "destination": "existing",
+                "enabled": False,
+                "base_token": base_token,
+                "table_id": table_id,
+                "provisioning": "existing",
+            }
+        )
+        if not same_target:
+            config["feishu"]["field_mapping"] = {}
+            config["health"]["feishu"]["last_verified_at"] = ""
+            config["health"]["feishu"]["last_failure_kind"] = ""
+            config["health"]["feishu"]["consecutive_failures"] = 0
+        changed = invalidate_for_feishu_change(config, previous, config["feishu"])
+        state["changed"] = changed
+        return config
+
     if intent == "feishu_provision_anchor":
         if not isinstance(value, dict):
             raise ConfigError("Feishu provisioning anchor must be an object")
@@ -650,6 +680,10 @@ def _apply_domain_transition(
             raise ConfigError("Feishu field mapping must be an object")
         previous = deepcopy(config["feishu"])
         config["feishu"]["field_mapping"] = deepcopy(value)
+        if str(config["feishu"].get("base_token") or "").strip() and str(
+            config["feishu"].get("table_id") or ""
+        ).strip():
+            config["feishu"]["enabled"] = True
         invalidate_for_feishu_change(config, previous, config["feishu"])
         return config
 

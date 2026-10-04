@@ -71,7 +71,7 @@ Use `manage next` as the configuration state source until it reports `ready`. Ap
 
    - If the current conversation itself arrives through a supported Feishu/Lark bot, read the exact App ID and sender Open ID from the trusted host/event context and pass them via `manage feishu-host-context --agent-stdin`; never ask the user to re-enter host-supplied values. Afterwards `manage feishu-context --verify` must match exactly one isolated lark-cli profile by that current-conversation App ID and pin it for all later calls; ignore which profile is active/default and stop on zero or duplicate App-ID matches.
    - If no local lark-cli or app configuration is found at all, do not broaden the search — ask the user whether to install the CLI, provide the App ID/secret, or skip Feishu.
-   - Hard boundaries on every branch: never guess identity from a bot display name, run raw `lark-cli`, mutate/select global profiles, supply `--profile`, persist device codes, or request an App Secret in ordinary chat. The App Secret arrives only through the prepared local secret file: run `manage feishu-app-secret --prepare-secret-file`, then `--open-secret-file`, tell the user to paste the secret as the file's single line and save, and consume it with `manage feishu-app-secret --secret-file <PATH>`; never ask the user to run shell commands or pipes for it. `user` reuses a valid isolated authorization or starts exactly one minimum Base device flow, pausing only for the user's authorization page; `bot` never starts user OAuth.
+   - Hard boundaries on every branch: never guess identity from a bot display name, run raw `lark-cli`, mutate/select global profiles, supply `--profile`, persist device codes, or request an App Secret in ordinary chat. The App Secret arrives through a one-time local inbox: `manage feishu-app-secret --prepare-inbox`, write the secret as that file's single line, then `manage feishu-app-secret --inbox <PATH>` (the file is deleted after one read). On a machine with a desktop editor, `--prepare-secret-file` / `--open-secret-file` / `--secret-file <PATH>` is the same channel. Never put the secret in a shell command or pipe. `user` reuses a valid isolated authorization or starts exactly one minimum Base device flow. A waiting link older than 10 minutes is replaced by the next `manage feishu-auth start`; do not start a second flow while the current link is still valid. `bot` never starts user OAuth. `manage next` and `manage feishu-setup` share one gate order: App ID, private profile, App Secret, then authorization.
 5. Present one bounded approval summary, including exact Base/table names if provisioning is allowed, qualified-record sync, and the exclusions below. Preview with `manage execution-policy set ...` and, after the user's single confirmation, persist it by repeating the same command with `--yes`. Configure this policy last: changing the Feishu identity, App, manager, target, or schema invalidates it.
 
 ### Automatic execution phase
@@ -108,7 +108,10 @@ Use `manage next` as the configuration state source until it reports `ready`. Ap
 
 10. Article bodies come from the paid redfox detail endpoint and are reused from the local cache. Retry only explicitly retryable redfox failures and report partial progress; cached truncation cannot be repaired by rereading. Discovery queues each successfully processed account before moving to the next, so a later blocking failure does not discard prior articles. Preserve failed Feishu writes locally for repair. Pause and ask only for OAuth/device completion, unresolved identity/account ambiguity, expired credentials, new scopes, changed App/identity/manager/target/schema, a forced below-threshold write, or a destructive action. Never interpret an unchanged failure as permission to broaden scope.
 
+   `done` syncs a qualified article only when the persisted execution policy allows it. After scoring, an explicit current write is `process sync-feishu --qualified`: every non-ad article at or above `min_score` that is not already synced, one field preflight for the batch. `sync-feishu --link` writes one article and refuses scores below the threshold unless `--force` is set. Advertisements are never written. `sync-feishu --all` is only the later automatic path, and it runs after an approved policy with Feishu sync allowed.
+
    ```text
+   bash scripts/run.sh process sync-feishu --qualified
    bash scripts/run.sh process sync-feishu --all
    ```
 
@@ -129,6 +132,7 @@ Example layout: `范围与处理统计 → 推荐文章 → 未读/内容不完�
 
 ```text
 bash scripts/run.sh discover --hours 48
+bash scripts/run.sh process sync-feishu --qualified --dry-run
 bash scripts/run.sh process sync-feishu --all --dry-run
 bash scripts/run.sh process export <OUTPUT.json>
 bash scripts/run.sh process clean --days 365
@@ -143,6 +147,8 @@ bash scripts/run.sh manage feishu-host-context --agent-stdin
 bash scripts/run.sh manage execution-policy set --mode autopilot --feishu-provisioning deny --feishu-sync deny --yes
 bash scripts/run.sh manage feishu-identity --as user
 bash scripts/run.sh manage feishu-app --app-id <APP_ID>
+bash scripts/run.sh manage feishu-app-secret --prepare-inbox
+bash scripts/run.sh manage feishu-app-secret --inbox <PATH>
 bash scripts/run.sh manage feishu-app-secret --prepare-secret-file
 bash scripts/run.sh manage feishu-app-secret --open-secret-file
 bash scripts/run.sh manage feishu-app-secret --secret-file <PATH>

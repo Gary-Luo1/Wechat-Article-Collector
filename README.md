@@ -77,7 +77,7 @@ bash scripts/run.sh manage status
 bash scripts/run.sh manage doctor
 bash scripts/run.sh process --format json inbox --status pending --sort newest
 bash scripts/run.sh process read --link "https://mp.weixin.qq.com/s/..."
-bash scripts/run.sh process sync-feishu --all --dry-run
+bash scripts/run.sh process sync-feishu --qualified --dry-run
 ```
 
 评分推荐 `--dims-file scores.json`。飞书与配置细节见 [`feishu.md`](skills/wechat-article-subscriber/references/feishu.md)、[`setup.md`](skills/wechat-article-subscriber/references/setup.md)。

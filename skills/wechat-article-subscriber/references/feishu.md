@@ -30,8 +30,9 @@ or `--as bot`.
 Two target modes are confirmed with the user before anything is written:
 - **Existing table** — the user pastes the table URL; `manage feishu-target --url <link>`
   parses the base/table tokens and verifies read access and the real fields
-  (read-only) before saving the target; the field mapping itself is saved by
-  `process feishu-check --save-mapping`. Nothing is created.
+  (read-only). If that read fails, the tokens are still saved and field verification
+  stays unfinished, so the same URL is not requested again. `process feishu-check
+  --save-mapping` stores the mapping and only then enables writes. Nothing is created.
 - **New standard table** — the wizard shows the exact 11-field list and only creates
   after the user confirms names and fields (one execution-policy approval).
 
@@ -50,10 +51,11 @@ ask the user, the exact next command, and — when no app exists yet — console
 guidance for creating one (open.feishu.cn, enterprise custom app, Base
 read/write scopes). The App Secret enters only through the prepared local secret
 file, so the user never runs shell commands: the Agent runs
-`manage feishu-app-secret --prepare-secret-file` (creates a 0600 one-line file in
-the application state directory), then `--open-secret-file` (opens it in the
-default editor), the user pastes the secret as the file's single line and saves,
-and the Agent consumes it with `manage feishu-app-secret --secret-file <PATH>`.
+`manage feishu-app-secret --prepare-inbox` (creates a 0600 one-line file in
+the application state directory), the secret is written as that file's single
+line, and the Agent consumes it with `manage feishu-app-secret --inbox <PATH>`.
+On a machine with a desktop editor, `--prepare-secret-file`, `--open-secret-file`,
+and `--secret-file <PATH>` are the same channel.
 The consumer rejects symlinks, paths outside the state directory, other
 filenames, the untouched placeholder, multi-line content, and oversized input;
 it strips surrounding whitespace (so a trailing newline is harmless), deletes
@@ -230,7 +232,11 @@ written to config.
 
 - If `user` is already ready with a valid token, reuse it and do not call `auth login`.
 - If `user` is not ready, start exactly one minimum-domain flow below. Keep and
-  resume that flow; never start a second flow after the user has authorized.
+  resume that flow while its link is still inside the 10-minute TTL. When
+  `feishu-auth start` sees a waiting flow older than that TTL, it marks the flow
+  expired and returns `start_single_user_base_authorization` for one replacement.
+  Never start a second flow after the user has authorized, and never call
+  `auth login --no-wait` again while the current link is still valid.
 - If `bot` was selected, do not call `auth login` at all. Configure the app secret
   through a safe local/stdin channel, ensure the required backend scopes exist,
   and verify bot readiness.
@@ -318,6 +324,10 @@ Known aliases include `标题/文章标题`, `链接/文章链接/URL`, `公众�
 
 Save only the Feishu section with `setup --feishu-agent-stdin` (or the restricted
 one-time inbox), configure the execution policy last, then run `process
-feishu-check --save-mapping`. The check remains read-only. A confirmed policy with
-`allow_feishu_sync:true` authorizes qualified record writes to this unchanged
-target; otherwise a current explicit `--feishu` request is required.
+feishu-check --save-mapping`. The check remains read-only. A confirmed autopilot
+policy with `allow_feishu_sync:true` authorizes later automatic writes of the
+pending queue via `sync-feishu --all`. An explicit current write does not wait
+for that policy: `sync-feishu --qualified` writes every non-ad scored article at
+or above `min_score` that is not already synced, and `sync-feishu --link` writes
+one article. Both refuse scores below the threshold; `--link --force` is the
+only way to write one below-threshold article. Advertisements are never written.

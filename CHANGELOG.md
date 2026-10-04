@@ -2,6 +2,24 @@
 
 ## 2.4.0 - Unreleased
 
+### Changed (one Feishu setup path, explicit qualified sync)
+
+- `manage next` uses the same Feishu gate order as `manage feishu-setup`: App ID,
+  private profile, App Secret, then user authorization. A missing App ID no longer
+  asks for a scan, and lark-cli `not configured` names the missing step.
+- `manage feishu-target --url` keeps the base and table tokens when field listing
+  fails, and leaves writes disabled until `process feishu-check --save-mapping`.
+- A waiting device authorization older than 10 minutes is replaced by the next
+  `manage feishu-auth start`. A link that is still valid is resumed.
+- `process sync-feishu --qualified` writes every non-ad article at or above
+  `min_score` that is not already synced, with one field preflight.
+  `sync-feishu --link` refuses a below-threshold score unless `--force` is set.
+  Advertisements are never written. `sync-feishu --all` runs only after an
+  approved execution policy allows Feishu sync.
+- The App Secret can be written to a one-time 0600 inbox
+  (`manage feishu-app-secret --prepare-inbox` / `--inbox`) and is deleted after
+  one read. The editor file remains available on a local desktop.
+
 ### Added (bundled default subscription roster)
 
 - The skill ships a default subscription roster at

@@ -1608,6 +1608,21 @@ def test_sync_json_preserves_non_retryable_lark_failure(
     )
 
     configured()
+    from config_store import load_config, save_config
+
+    saved = load_config()
+    saved["feishu"].update(
+        {"destination": "existing", "enabled": True, "base_token": "base", "table_id": "tbl"}
+    )
+    saved["setup"]["execution_policy"].update(
+        {
+            "confirmed": True,
+            "mode": "autopilot",
+            "allow_feishu_sync": True,
+            "approved_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    save_config(saved)
     article = {
         "title": "Permission boundary",
         "link": "https://mp.weixin.qq.com/s/permission-boundary",
@@ -2173,16 +2188,26 @@ def test_manage_accepts_format_flag_after_subcommand(capsys):
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
-def test_payload_error_not_configured_maps_to_secret_fix():
+def test_payload_error_not_configured_names_the_missing_step(isolated_home):
+    from config_store import load_config, save_config
     from lark_runtime import LarkCLIError, _payload_error
 
     error = _payload_error({"error": {"type": "config", "message": "not configured"}}, [])
     assert isinstance(error, LarkCLIError)
     assert error.kind == "config"
-    assert "feishu-app-secret" in str(error)
-    assert "--prepare-secret-file" in str(error)
-    assert "--secret-file <PATH>" in str(error)
+    assert "feishu-app --app-id" in str(error)
     assert "printf" not in str(error)
+
+    configured()
+    config = load_config()
+    config["setup"]["feishu_identity_confirmed"] = True
+    config["feishu"].update(
+        {"identity": "user", "expected_app_id": "cli_example", "cli_profile": "p1"}
+    )
+    save_config(config)
+    error = _payload_error({"error": {"message": "not configured"}}, [])
+    assert "prepare-inbox" in str(error)
+    assert "--inbox" in str(error)
 
 
 def test_payload_error_generic_failure_includes_raw_response():
