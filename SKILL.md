@@ -52,7 +52,7 @@ bash scripts/run.sh lark auth login --device-code <CODE>
 bash scripts/run.sh lark auth qrcode <URL> --output <RELATIVE_PATH>
 ```
 
-If the isolated runtime is missing, direct the user to run the repository installer. Do not install packages globally without permission. Read [references/setup.md](references/setup.md) for supported Agent locations and manual installation.
+If the isolated runtime is missing, create it in the skill data directory and install `requirements.txt` there. Do not install packages globally without permission. Read [references/setup.md](references/setup.md) for the data directory and dependency step.
 
 ## Workflow
 

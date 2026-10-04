@@ -1,4 +1,4 @@
-# Installation and WeChat dialogue setup
+# WeChat dialogue setup
 
 ## Supported environments
 
@@ -7,25 +7,20 @@
 - A local Agent that supports Skills plus shell, filesystem, and network tools
 - Optional Feishu: Node.js 18+ and a compatible `@larksuite/cli`
 
-Sandboxed Agents without those capabilities can discover the Skill but cannot execute it. After installation, restart/open the Agent and say “配置微信公众号文章订阅”; configuration is dialogue-first, not a shell wizard.
+Sandboxed Agents without those capabilities can discover the Skill but cannot execute it. Open the Agent and say “配置微信公众号文章订阅”; configuration is dialogue-first, not a shell wizard.
 
-## Repository installer
+## Python runtime
 
-```text
-bash install.sh --target agents
-.\install.ps1 -Target agents
-```
+Run commands from this skill directory with `bash scripts/run.sh` or `.\scripts\run.ps1`. `setup`, `manage`, `process`, and `lark` can use the current Python 3.9+ interpreter. `discover` needs `requests` and `curl_cffi` from `requirements.txt`.
 
-Targets: `agents`, `codex`, `claude`, `copilot`, `openclaw`, `hermes`, or `all`.
-`openclaw` installs to `~/.openclaw/skills` and `hermes` to `~/.hermes/skills`.
-For another Agent, install the canonical Skill to an exact folder:
+If that isolated runtime is missing, create it in the local state directory and install dependencies there. Do not install packages globally without permission.
 
 ```text
-bash install.sh --target agents --destination /custom/skills/wechat-article-subscriber
-.\install.ps1 -Target agents -InstallPath C:\custom\skills\wechat-article-subscriber
+python3 -m venv <DATA_HOME>/venv
+<DATA_HOME>/venv/bin/python -m pip install -r requirements.txt
 ```
 
-Do not combine a custom destination with `all`. The installer atomically backs up an existing copy, installs only canonical files, and creates an isolated runtime in application state. `WECHAT_SKILL_INSTALL_ROOT` remains available for CI. `--no-deps` / `-NoDeps` requires `requests` and `curl_cffi` in the selected runtime.
+On Windows, use `<DATA_HOME>\venv\Scripts\python.exe`. `<DATA_HOME>` is the path listed under Local state, or `WECHAT_ARTICLE_HOME` when that override is set.
 
 ## Windows configuration without pipes
 

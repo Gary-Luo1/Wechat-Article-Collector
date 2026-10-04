@@ -1,15 +1,7 @@
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.scratch/
-.ruff_cache/
 .venv/
 venv/
-dist/
-build/
-openspec/
-.DS_Store
-**/.DS_Store
 .env
 config.json
 queue.json
