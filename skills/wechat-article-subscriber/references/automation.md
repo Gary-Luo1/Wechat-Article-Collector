@@ -13,11 +13,14 @@ The deterministic unattended action is discovery:
 bash scripts/run.sh discover --format json
 ```
 
-It fetches configured accounts and updates the local queue. Article reading/scoring
-requires an Agent turn because untrusted content must be interpreted under the Skill
-safety rules. During that Agent turn, a confirmed autopilot policy authorizes
+It fetches configured accounts (at most `max_articles_per_account` each, default 3)
+and updates the local queue. It does not read or score. Reading and scoring happen
+in an Agent turn: `process batch-read` fetches every pending body, and the Agent
+scores each non-ad article on the five-dimension rubric without asking the user
+for scores. During that Agent turn, a confirmed autopilot policy authorizes
 routine reading/scoring and qualified Feishu writes to the unchanged configured
-Base/table without per-article prompts.
+Base/table without per-article prompts. A scheduler that only runs `discover`
+does not score or write Feishu.
 
 `process --format json digest-plan` is also deterministic and local, so it may be
 used after discovery to select bounded metadata candidates. It is not a substitute

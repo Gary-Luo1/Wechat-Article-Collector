@@ -33,22 +33,33 @@
   stop the run.
 - Article body reads honor `settings.request_delay`. `batch-read` reuses one
   client so the delay applies between paid detail calls.
-- The daily read is `process batch-read --digest` and stops at
-  `preferences.digest_limit` instead of scoring every queued article.
 - `content_dedup` now defaults on and ignores the account name, so the same
   title, digest, and publish time from two accounts is queued once.
-- A truncated body can be scored locally. `done` stores
-  `content_coverage=incomplete` and still refuses to sync it to Feishu.
-  Title-only ads are not fetched.
-- When an account still has in-window articles past `max_articles_per_account`,
-  discovery reports `本号还有文章没拉完` and does not arm the cooldown. The next
-  pass skips links already queued. After three partial passes the cooldown is
-  armed so a busy feed cannot bill without limit.
+- Title-only ads are not fetched.
 - Active, unstarred pending articles older than two lookback windows (at least
   48 hours) are dropped on discovery. Favorites and later-reading items stay.
   `process clean` also drops pending articles older than `--days`.
 - A body the library has not crawled is marked `uncrawled` and retried on the
   next discovery. Recovered text is cached for the later read.
+
+### Changed (read every kept article, cap three per account)
+
+- `settings.max_articles_per_account` now defaults to 3. Hitting that cap
+  records `已达每号上限，其余本窗口文章未收录` and still arms the cooldown.
+  Discovery does not schedule another paid pass to exceed the cap. Already
+  queued links do not consume it. A saved config that already stores another
+  number keeps that number.
+- The daily read is `process batch-read` with no limit: every pending article,
+  not `preferences.digest_limit`. `digest_limit` only bounds the optional
+  `digest-plan`. The next action after a confirmed daily run is
+  `read_score_all_pending`.
+- The Agent scores every non-ad article it reads, using the existing
+  five-dimension rubric, and does not ask the user for scores. A scheduler
+  that only runs `discover` still does not score.
+- A body over 100 KiB is still truncated in the local cache and marked
+  `content_coverage=incomplete`. That no longer blocks Feishu. A row stores
+  the title, account, link, a summary of at most 500 characters, the score,
+  the rationale, tags, and dates — not the article body.
 
 ### Changed (runtime-cost and queue-size optimization)
 

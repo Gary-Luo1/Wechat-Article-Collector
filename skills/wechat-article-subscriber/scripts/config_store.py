@@ -59,10 +59,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "settings": {
         "check_hours": 24,
         "request_delay": 3.0,
-        "max_articles_per_account": 10,
-        # URL identity is authoritative. Optional content deduplication is off by
-        # default because distinct articles may legitimately reuse titles and
-        # summaries.
+        "max_articles_per_account": 3,
+        # URL identity is authoritative. Content dedup is on by default and
+        # ignores the account name, so one title, digest, and publish time
+        # is queued once even when two accounts reprint it.
         "content_dedup": True,
         "min_score": 6.0,
         "output_language": "auto",

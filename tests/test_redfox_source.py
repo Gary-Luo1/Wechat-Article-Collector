@@ -241,7 +241,7 @@ def test_short_window_does_not_cover_a_later_full_window(isolated_home, monkeypa
     assert diagnostics[0]["skipped_cooldown"] == 0
 
 
-def test_limit_reached_does_not_arm_cooldown_until_three_passes(isolated_home, monkeypatch):
+def test_account_cap_arms_cooldown_instead_of_refetching(isolated_home, monkeypatch):
     from config_store import save_config
 
     save_config(_config())
@@ -266,22 +266,18 @@ def test_limit_reached_does_not_arm_cooldown_until_three_passes(isolated_home, m
     def persist(articles):
         return 1
 
-    for expected_runs in (1, 2):
-        diagnostics: list[dict] = []
-        discover_articles(load_config(), 24, None, diagnostics, persist)
-        assert diagnostics[0]["truncated"] is True
-        assert diagnostics[0]["note"] == "本号还有文章没拉完"
-        assert diagnostics[0]["cooldown_armed"] is False
-        saved = load_config()["subscriptions"][0]
-        assert "last_discovered_at" not in saved
-        assert saved["discovery_partial_runs"] == expected_runs
-    discover_articles(load_config(), 24, None, [], persist)
+    diagnostics: list[dict] = []
+    discover_articles(load_config(), 24, None, diagnostics, persist)
+    assert diagnostics[0]["capped"] is True
+    assert diagnostics[0]["note"] == "已达每号上限，其余本窗口文章未收录"
+    assert diagnostics[0]["cooldown_armed"] is True
+    assert "truncated" not in diagnostics[0]
     armed = load_config()["subscriptions"][0]
     assert armed.get("last_discovered_at")
     assert "discovery_partial_runs" not in armed
-    assert fake.calls == 3
+    assert fake.calls == 1
     discover_articles(load_config(), 24, None, [], persist)
-    assert fake.calls == 3
+    assert fake.calls == 1
 
 
 def test_wider_recent_fetch_still_covers_a_shorter_window():
@@ -837,7 +833,11 @@ def test_daily_preview_then_confirmed_run(isolated_home, monkeypatch):
     assert preview[0]["subscriptions"][0]["alias"] == "rmrb"
 
     result = manage._daily(types_simple_namespace(yes=True))
-    assert result[1] == "read_score_digest_candidates"
+    assert result[1] == "read_score_all_pending"
+    assert result[0]["per_account_article_cap"] == 3
+    assert result[0]["estimated_detail_call_cap"] == 3
+    assert result[0]["read_scope"] == "all_pending"
+    assert result[0]["scoring"] == "agent"
     assert result[0]["run"]["discovered"] == 0
 
 

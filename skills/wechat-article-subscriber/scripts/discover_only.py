@@ -26,10 +26,7 @@ from redfox_client import RedfoxAPIError, RedfoxAuthError, RedfoxClient
 
 logger = logging.getLogger("wechat-discover")
 
-# A busy account can exceed max_articles_per_account. Each partial pass
-# fetches the next batch and leaves the cooldown unarmed. After this many
-# partial passes the cooldown is armed anyway so a full feed cannot bill forever.
-PARTIAL_DISCOVERY_LIMIT = 3
+# max_articles_per_account is the collection cap, not a page size to retry past.
 UNCRAWLED_RETRY_LIMIT = 20
 
 
@@ -98,25 +95,6 @@ def _mark_subscription_discovered(
     modify_config(mutate, path=config_path)
 
 
-def _mark_partial_discovery(identity: tuple[str, str, str], config_path: Path | None, runs: int) -> None:
-    """Remember an unfinished window without starting the paid cooldown."""
-
-    def mutate(saved: dict) -> dict:
-        for sub in saved["subscriptions"]:
-            if (
-                str(sub.get("name", "")).strip(),
-                str(sub.get("alias", "")).strip(),
-                str(sub.get("biz", "")).strip(),
-            ) == identity:
-                sub.pop("last_discovered_at", None)
-                sub.pop("last_discovered_window_hours", None)
-                sub["discovery_partial_runs"] = runs
-                return saved
-        return saved
-
-    modify_config(mutate, path=config_path)
-
-
 def _queued_links() -> set[str]:
     """Links already stored, so a later partial pass can continue past them."""
     links: set[str] = set()
@@ -135,14 +113,6 @@ def _queued_links() -> set[str]:
             if value:
                 links.add(value)
     return links
-
-
-def _partial_runs(subscription: dict) -> int:
-    raw = subscription.get("discovery_partial_runs") or 0
-    try:
-        return max(0, int(raw))
-    except (TypeError, ValueError):
-        return 0
 
 
 def pending_expiry_hours(config: dict) -> float:
@@ -299,21 +269,13 @@ def discover_articles(
                 diagnostic["status"] = "ok"
                 if listing_info["empty_reason"] == "outside_window" and not account_articles:
                     diagnostic["window_empty"] = True
-                truncated = bool(listing_info.get("more_in_window")) or (
+                capped = bool(listing_info.get("more_in_window")) or (
                     listing_info.get("empty_reason") == "limit_reached"
                 )
                 identity = (name, alias, biz)
-                if truncated:
-                    diagnostic["truncated"] = True
-                    diagnostic["coverage"] = "incomplete"
-                    diagnostic["note"] = "本号还有文章没拉完"
-                    runs = _partial_runs(subscription) + 1
-                    if runs < PARTIAL_DISCOVERY_LIMIT:
-                        diagnostic["cooldown_armed"] = False
-                        if diagnostics is not None:
-                            diagnostics.append(diagnostic)
-                        _mark_partial_discovery(identity, config_path, runs)
-                        continue
+                if capped:
+                    diagnostic["capped"] = True
+                    diagnostic["note"] = "已达每号上限，其余本窗口文章未收录"
                 diagnostic["cooldown_armed"] = True
                 if diagnostics is not None:
                     diagnostics.append(diagnostic)
@@ -419,18 +381,8 @@ def main(argv: list[str] | None = None) -> int:
             "body_retry": body_retry,
             "accounts": diagnostics,
         }
-        truncated_open = any(
-            item.get("truncated") and not item.get("cooldown_armed") for item in diagnostics
-        )
         if json_output:
-            print(dump(success(
-                data,
-                next_action=(
-                    "rerun_discovery_for_truncated_accounts"
-                    if truncated_open
-                    else "process_pending_articles"
-                ),
-            )))
+            print(dump(success(data, next_action="process_pending_articles")))
         else:
             for item in diagnostics:
                 note = f"; {item['note']}" if item.get("note") else ""

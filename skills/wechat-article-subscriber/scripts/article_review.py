@@ -44,8 +44,8 @@ class ArticleContentIncompleteError(ValueError):
 
     def __init__(self) -> None:
         super().__init__(
-            "article content is truncated; keep pending for partial review or dismiss it; "
-            "scoring and Feishu sync require complete content, and rereading this cache will not restore it"
+            "article content is truncated in the local cache; score the delivered portion. "
+            "Feishu stores the summary and score, not the article body"
         )
 
 
@@ -86,8 +86,11 @@ def sync_entry(
     dry_run: bool = False,
     preflight_result: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Sync one complete entry and return reusable batch preflight data."""
-    require_complete_content(entry["article"])
+    """Sync one scored entry and return reusable batch preflight data.
+
+    The Feishu row is title, account, link, summary, score, and rationale.
+    A locally truncated body does not block that write.
+    """
     feishu = load_config()["feishu"]
     if not feishu["enabled"]:
         raise ConfigError("Feishu sync is disabled; complete Agent setup first")
@@ -187,29 +190,9 @@ def complete_review(
     metadata["content_source"] = str(article.get("content_source") or "direct")
     if truncated:
         metadata["content_coverage"] = "incomplete"
-        # The delivered prefix can be scored. It is not a complete article, so
-        # it never becomes a Feishu row, including under --force-feishu.
-        status = "skipped_incomplete"
-        if arguments.dry_run:
-            return {
-                "message": (
-                    f"Dry run: score {metadata['score']} uses incomplete content "
-                    "and will not sync to Feishu"
-                ),
-                "status": status,
-                "score": metadata["score"],
-                "content_coverage": "incomplete",
-            }
-        complete_article(article["link"], metadata, sync_status=status)
-        return {
-            "message": (
-                f"Completed: {sanitize_text(article.get('title', ''), 512)} "
-                f"(score {metadata['score']}) | 同步: 内容不完整，已按已读部分记分，不同步飞书"
-            ),
-            "status": status,
-            "score": metadata["score"],
-            "content_coverage": "incomplete",
-        }
+    coverage_note = (
+        "；正文超过本地 100 KiB 缓存，飞书只记摘要和评分" if truncated else ""
+    )
     sync_requested = bool(arguments.feishu or policy_sync)
     if sync_requested:
         if config is None:
@@ -225,16 +208,21 @@ def complete_review(
     if arguments.dry_run:
         if status != "pending":
             return {
-                "message": f"Dry run: score {metadata['score']} is below the configured Feishu threshold",
+                "message": (
+                    f"Dry run: score {metadata['score']} is below the configured Feishu threshold"
+                    f"{coverage_note}"
+                ),
                 "status": status,
                 "score": metadata["score"],
+                **({"content_coverage": "incomplete"} if truncated else {}),
             }
         sync({"article": article, "metadata": metadata}, dry_run=True)
         return {
             "message": "Dry run succeeded; article remains pending: "
-            f"{sanitize_text(article.get('title', ''), 512)}",
+            f"{sanitize_text(article.get('title', ''), 512)}{coverage_note}",
             "status": "dry_run",
             "score": metadata["score"],
+            **({"content_coverage": "incomplete"} if truncated else {}),
         }
     entry = complete_article(article["link"], metadata, sync_status=status)
     if status == "pending":
@@ -262,7 +250,8 @@ def complete_review(
         }.get(status, status)
     return {
         "message": f"Completed: {sanitize_text(article.get('title', ''), 512)} "
-        f"(score {metadata['score']}) | 同步: {sync_note}",
+        f"(score {metadata['score']}) | 同步: {sync_note}{coverage_note}",
         "status": status,
         "score": metadata["score"],
+        **({"content_coverage": "incomplete"} if truncated else {}),
     }

@@ -83,6 +83,11 @@ class TestConfig:
         assert path.exists()
         assert load_config()["redfox"]["api_key"] == "rf-secret"
 
+    def test_default_per_account_cap_is_three(self):
+        from config_store import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["settings"]["max_articles_per_account"] == 3
+
     def test_rejects_bad_range(self):
         from config_store import DEFAULT_CONFIG, ConfigError, validate_config
 
@@ -1167,6 +1172,17 @@ class TestProcess:
         assert "ARTICLE 1/2" in output
         assert "ARTICLE 2/2" in output
 
+    def test_batch_read_without_limit_reads_the_whole_inbox(self, capsys):
+        import process_pending
+        from queue_helpers import add_pending
+
+        self.valid_config()
+        add_pending([article(str(index)) for index in range(11)])
+        assert process_pending.main(["batch-read"]) == 0
+        output = capsys.readouterr().out
+        assert "ARTICLE 11/11" in output
+        assert "Stopped at --limit" not in output
+
     def test_read_records_proof_then_allows_completion(self):
         import process_pending
         from queue_helpers import add_pending, read_queue
@@ -1184,16 +1200,17 @@ class TestProcess:
             ["done", "--link", item["link"], "--dims", self.dims()]
         ) == 0
 
-    def test_truncated_read_stays_cached_and_blocks_completion_and_sync(self, monkeypatch, capsys):
+    def test_truncated_read_stays_cached_and_still_syncs_the_summary(self, monkeypatch, capsys):
         import process_pending
         from queue_helpers import add_pending, read_queue, complete_article, is_content_truncated
         from redfox_client import clean_content
 
-        self.valid_config()
+        self.valid_config(feishu=True)
         item = {**article("partial", verified=False), "work_uuid": "partial-body"}
         item.pop("content")
         add_pending([item])
         calls = []
+        synced: list[str] = []
 
         class DetailClient:
             def query_work(self, work_uuid):
@@ -1203,8 +1220,13 @@ class TestProcess:
             def close(self):
                 pass
 
+        def fake_upsert(feishu, art, metadata, *, dry_run=False, preflight_result=None):
+            synced.append(str(art.get("link")))
+            assert "content" not in art or not str(art.get("content") or "").strip()
+            return {"preflight": {"ok": True}}
+
         monkeypatch.setattr("redfox_client.RedfoxClient", lambda *a, **k: DetailClient())
-        monkeypatch.setattr(process_pending, "production_feishu_target", lambda *a: pytest.fail("truncated content reached Feishu"))
+        monkeypatch.setattr("feishu_target.upsert_article", fake_upsert)
         for _ in range(2):
             assert process_pending.main(["read", "--link", item["link"]]) == 0
             assert "Content coverage: incomplete" in capsys.readouterr().out
@@ -1217,14 +1239,14 @@ class TestProcess:
         ) == 0
         envelope = json.loads(capsys.readouterr().out)
         assert envelope["ok"] is True
-        assert any("内容不完整" in line for line in envelope["data"]["output"])
+        assert any("100 KiB" in line for line in envelope["data"]["output"])
+        assert item["link"] in synced
         entry = next(iter(read_queue()["processed"].values()))
         assert entry["metadata"]["content_coverage"] == "incomplete"
-        assert entry["sync_status"] == "skipped_incomplete"
+        assert entry["sync_status"] == "synced"
         assert "content" not in entry["article"]
         assert is_content_truncated(entry["article"])
 
-        # A previously queued sync of a truncated body still must not reach Feishu.
         forced = {**article("forced-partial", verified=False), "work_uuid": "forced-body"}
         forced.pop("content")
         forced["content"] = clean_content("长" * 40000)
@@ -1235,13 +1257,12 @@ class TestProcess:
             "content_truncated": True,
         }
         add_pending([forced])
-        queued = complete_article(forced["link"], {"score": 8}, sync_status="pending")
+        queued = complete_article(forced["link"], {"score": 8, "summary": "摘要"}, sync_status="pending")
         assert is_content_truncated(queued["article"])
-        for selection in (["--all"], ["--link", forced["link"]]):
-            assert process_pending.main(["--format", "json", "sync-feishu", *selection]) == 1
-            envelope = json.loads(capsys.readouterr().out)
-            assert envelope["error"]["code"] == "ARTICLE_CONTENT_INCOMPLETE"
-        assert read_queue()["processed"][queued["article"]["normalized_url"]]["sync_status"] == "pending"
+        synced.clear()
+        assert process_pending.main(["--format", "json", "sync-feishu", "--link", forced["link"]]) == 0
+        assert forced["link"] in synced
+        assert read_queue()["processed"][queued["article"]["normalized_url"]]["sync_status"] == "synced"
 
     def test_legacy_truncation_marker_blocks_completion_without_reread(self, capsys):
         import process_pending
@@ -1255,7 +1276,7 @@ class TestProcess:
         assert envelope["ok"] is True
         saved = next(iter(read_queue()["processed"].values()))
         assert saved["metadata"]["content_coverage"] == "incomplete"
-        assert saved["sync_status"] == "skipped_incomplete"
+        assert saved["sync_status"] == "not_requested"
 
     def test_failed_reread_keeps_existing_verified_proof(self):
         import process_pending

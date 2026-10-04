@@ -372,7 +372,10 @@ def _print_article_unprotected(
     print(text)
     print(f"--- END UNTRUSTED ARTICLE CONTENT {nonce} ---")
     if is_content_truncated(saved):
-        print("Content coverage: incomplete (truncated); do not score, complete, or sync this article.")
+        print(
+            "Content coverage: incomplete (local cache truncated at 100 KiB). "
+            "Score the delivered text. Feishu stores the summary and score, not the body."
+        )
     print(f"Content source: {article.get('content_source') or 'direct'}")
     suspected = is_advertisement(str(article.get("title", "")), text or "")
     print(f"Ad heuristic: {'suspected' if suspected else 'not detected'}")
@@ -583,7 +586,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="read only the current digest candidates, not the whole inbox",
     )
-    batch_parser.add_argument("--limit", type=int)
+    batch_parser.add_argument(
+        "--limit",
+        type=int,
+        help="stop after N selected articles; omit to read every selected article",
+    )
     done_parser = commands.add_parser("done")
     _add_selector(done_parser)
     done_parser.add_argument("--ad", action="store_true")
@@ -642,8 +649,7 @@ def _dispatch(arguments: argparse.Namespace) -> int:
     if arguments.command == "batch-read":
         if arguments.limit is not None and (arguments.limit < 1 or arguments.limit > 100):
             raise ValueError("--limit must be between 1 and 100")
-        limit = arguments.limit if arguments.digest or arguments.limit is not None else 10
-        return cmd_batch_read(limit, digest=arguments.digest)
+        return cmd_batch_read(arguments.limit, digest=arguments.digest)
     if arguments.command == "done":
         if arguments.index is None and not arguments.link:
             raise ValueError("provide an index or --link")

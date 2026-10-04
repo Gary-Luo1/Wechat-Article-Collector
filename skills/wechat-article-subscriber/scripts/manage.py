@@ -105,7 +105,7 @@ ACTION_LABELS = {
     "finish_existing_user_base_authorization": "完成等待中的扫码授权",
     "continue_resource_provisioning": "继续被批准的资源创建",
     "read_score_digest_candidates": "阅读并评分简报候选文章",
-    "rerun_discovery_for_truncated_accounts": "有公众号超出每号篇数上限，再发现一次以继续拉取",
+    "read_score_all_pending": "阅读并给全部待读文章打分",
     "generate_digest_plan": "生成文章简报计划",
     "treat_as_already_done": "目标已存在，视为完成",
     "ask_user_for_search_window": "选择文章搜索时间范围",
@@ -284,8 +284,9 @@ def _doctor(*, online: bool) -> tuple[dict[str, Any], str]:
             {
                 "kind": "search_window_coverage",
                 "message": (
-                    "The lookback window exceeds 48 hours while the per-account limit is "
-                    "10 or lower; busy accounts may not be covered completely."
+                    "The lookback window exceeds 48 hours while each account keeps at most "
+                    f"{int(config['settings']['max_articles_per_account'])} articles; "
+                    "anything beyond that cap in the window is left out."
                 ),
                 "next_action": "increase_max_articles_per_account_or_reduce_search_window",
             }
@@ -454,7 +455,6 @@ def _daily_next_action(config: dict[str, Any]) -> str:
 
 def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     """Preview without side effects; --yes executes within the approved scope."""
-    from article_inbox import plan_digest
     from discover_only import (
         _subscription_cooldown_active,
         discover_articles,
@@ -499,12 +499,21 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
             for item in subscriptions
             if item["alias"] and not item["cooldown_active"]
         ),
-        "estimated_detail_call_cap": config["preferences"]["digest_limit"],
-        "read_scope": "digest_candidates",
+        "per_account_article_cap": int(config["settings"]["max_articles_per_account"]),
+        "estimated_detail_call_cap": sum(
+            1
+            for item in subscriptions
+            if item["alias"] and not item["cooldown_active"]
+        )
+        * int(config["settings"]["max_articles_per_account"]),
+        "read_scope": "all_pending",
+        "scoring": "agent",
         "note": (
             "1 list call per subscription outside its cooldown. "
-            "The daily read fetches at most digest_limit article bodies "
-            "(process batch-read --digest), not every queued article."
+            "Each account keeps at most max_articles_per_account new articles; "
+            "further articles in the window are left out and the cooldown still starts. "
+            "The agent then reads and scores every pending article. "
+            "Feishu stores the summary and score, not the article body."
         ),
     }
     if not arguments.yes:
@@ -527,25 +536,20 @@ def _daily(arguments: argparse.Namespace) -> tuple[dict[str, Any], str]:
     discovered = discover_articles(
         config, float(config["settings"]["check_hours"]), None, diagnostics, persist
     )
-    preferences = config["preferences"]
-    digest = plan_digest(preferences, hours=preferences["digest_hours"], limit=preferences["digest_limit"])
+    from queue_helpers import get_pending
+
     body_retry = retry_uncrawled_bodies(
         config["redfox"]["api_key"], config["settings"]["request_delay"]
     )
     plan["run"] = {
         "discovered": len(discovered),
         "queued": queued,
+        "pending": len(get_pending()),
         "expired_pending": expired_pending,
         "body_retry": body_retry,
         "accounts": diagnostics,
-        "digest_candidates": digest["candidates"],
     }
-    truncated_open = any(
-        item.get("truncated") and not item.get("cooldown_armed") for item in diagnostics
-    )
-    if truncated_open:
-        return plan, "rerun_discovery_for_truncated_accounts"
-    return plan, "read_score_digest_candidates"
+    return plan, "read_score_all_pending"
 
 
 def _bundled_roster_count() -> int:
