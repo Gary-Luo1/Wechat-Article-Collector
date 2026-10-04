@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptRoot = Split-Path -Parent $PSCommandPath
-$sourceDir = Join-Path $scriptRoot "skills\wechat-article-subscriber"
+$sourceDir = $scriptRoot
 
 function Find-Python {
     $candidates = @()

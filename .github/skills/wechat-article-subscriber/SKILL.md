@@ -12,4 +12,4 @@ description: |
 
 # WeChat Article Subscriber
 
-Use the canonical implementation at [the bundled Skill](../../../skills/wechat-article-subscriber/SKILL.md).
+Use the canonical implementation at [the bundled Skill](../../../SKILL.md).

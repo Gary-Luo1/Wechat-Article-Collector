@@ -12,7 +12,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "skills" / "wechat-article-subscriber" / "scripts"
+SCRIPTS = ROOT / "scripts"
 
 
 def configured(home: Path) -> dict:

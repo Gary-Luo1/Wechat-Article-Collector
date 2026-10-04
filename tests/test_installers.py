@@ -246,7 +246,7 @@ def test_unix_wrapper_prefers_python3(tmp_path: Path):
     environment["PATH"] = f"{commands}{os.pathsep}{environment.get('PATH', '')}"
 
     result = subprocess.run(
-        [bash, str(ROOT / "skills" / SKILL_NAME / "scripts" / "run.sh"), "process", "--help"],
+        [bash, str(ROOT / "scripts" / "run.sh"), "process", "--help"],
         cwd=ROOT,
         env=environment,
         check=False,

@@ -10,7 +10,8 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "wechat-article-subscriber"
+SKILL_FILES = ("SKILL.md", "requirements.txt")
+SKILL_DIRS = ("agents", "assets", "references", "scripts")
 TOP_FILES = (
     "LICENSE",
     "install.sh",
@@ -20,18 +21,19 @@ SKILL_SUFFIXES = {".md", ".txt", ".py", ".sh", ".ps1", ".yaml", ".yml"}
 
 
 def release_files() -> list[Path]:
-    files = [ROOT / name for name in TOP_FILES]
+    files = [ROOT / name for name in (*TOP_FILES, *SKILL_FILES)]
     files.append(ROOT / ".codex-plugin" / "plugin.json")
     for adapter_root in (ROOT / ".agents", ROOT / ".claude", ROOT / ".github" / "skills"):
         files.extend(adapter_root.rglob("SKILL.md"))
-    files.extend(
-        path
-        for path in SKILL.rglob("*")
-        if path.is_file()
-        and path.suffix.lower() in SKILL_SUFFIXES
-        and "__pycache__" not in path.parts
-        and ".pytest_cache" not in path.parts
-    )
+    for name in SKILL_DIRS:
+        files.extend(
+            path
+            for path in (ROOT / name).rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in SKILL_SUFFIXES
+            and "__pycache__" not in path.parts
+            and ".pytest_cache" not in path.parts
+        )
     missing = [path for path in files if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"required release files are missing: {missing}")

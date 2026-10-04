@@ -15,16 +15,21 @@ TOP_FILES = (
     ".gitattributes",
     ".gitignore",
     "LICENSE",
+    "SKILL.md",
     "install.sh",
     "install.ps1",
     "requirements-dev.txt",
+    "requirements.txt",
 )
 SOURCE_ROOTS = (
     ".agents",
     ".claude",
     ".codex-plugin",
     ".github",
-    "skills",
+    "agents",
+    "assets",
+    "references",
+    "scripts",
     "tests",
     "tools",
 )

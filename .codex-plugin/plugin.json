@@ -6,7 +6,7 @@
   "repository": "https://github.com/Gary-Luo1/Wechat-Article-Collector",
   "license": "MIT",
   "keywords": ["wechat", "feishu", "article", "local-first"],
-  "skills": "./skills",
+  "skills": "./",
   "interface": {
     "displayName": "WeChat Article Subscriber",
     "shortDescription": "Discover, evaluate, and organize WeChat articles locally.",

@@ -11,9 +11,7 @@ import re
 from pathlib import Path
 
 
-SKILL_DIR = (
-    Path(__file__).resolve().parents[1] / "skills" / "wechat-article-subscriber"
-)
+SKILL_DIR = Path(__file__).resolve().parents[1]
 DOC_FILES = [SKILL_DIR / "SKILL.md", *sorted((SKILL_DIR / "references").glob("*.md"))]
 
 

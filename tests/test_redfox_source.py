@@ -16,7 +16,7 @@ from types import SimpleNamespace
 def types_simple_namespace(**kw):
     return SimpleNamespace(**kw)
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "wechat-article-subscriber" / "scripts"
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from config_store import ConfigError, load_config, validate_config  # noqa: E402

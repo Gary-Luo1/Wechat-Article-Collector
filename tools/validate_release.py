@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "wechat-article-subscriber"
+SKILL = ROOT
 ADAPTERS = (
     ROOT / ".agents" / "skills" / "wechat-article-subscriber",
     ROOT / ".claude" / "skills" / "wechat-article-subscriber",
@@ -45,8 +45,10 @@ def read_frontmatter(path: Path) -> tuple[dict[str, str], str]:
 def validate_skill() -> None:
     skill_md = SKILL / "SKILL.md"
     fields, text = read_frontmatter(skill_md)
-    if fields["name"] != SKILL.name or not re.fullmatch(r"[a-z0-9-]{1,64}", fields["name"]):
-        fail("skill name is invalid or does not match the directory")
+    if fields["name"] != "wechat-article-subscriber" or not re.fullmatch(
+        r"[a-z0-9-]{1,64}", fields["name"]
+    ):
+        fail("skill name is invalid")
     if not fields["description"] or len(fields["description"]) > 1024:
         fail("skill description must contain 1-1024 characters")
     if len(text.splitlines()) > 500:
@@ -65,11 +67,9 @@ def validate_skill() -> None:
     present = forbidden.intersection(path.name for path in SKILL.iterdir())
     if present:
         fail(f"skill bundle contains repository/runtime files: {sorted(present)}")
-    allowed = {"SKILL.md", "requirements.txt", "agents", "scripts", "references", "assets"}
-    generated = {".pytest_cache", "__pycache__"}
-    unexpected = {path.name for path in SKILL.iterdir()} - allowed - generated
-    if unexpected:
-        fail(f"skill bundle contains unexpected top-level paths: {sorted(unexpected)}")
+    for required_name in ("requirements.txt", "agents", "scripts", "references", "assets"):
+        if not (SKILL / required_name).exists():
+            fail(f"missing skill path: {required_name}")
     for wrapper in (SKILL / "scripts" / "run.sh", SKILL / "scripts" / "run.ps1"):
         if not wrapper.is_file():
             fail(f"missing platform wrapper: {wrapper.relative_to(ROOT)}")
@@ -86,7 +86,7 @@ def validate_skill() -> None:
 
 
 def validate_adapters() -> None:
-    canonical_reference = "../../../skills/wechat-article-subscriber/SKILL.md"
+    canonical_reference = "../../../SKILL.md"
     for adapter in ADAPTERS:
         skill_md = adapter / "SKILL.md"
         fields, text = read_frontmatter(skill_md)
@@ -127,8 +127,15 @@ def validate_plugin() -> None:
     skills = manifest.get("skills")
     if not isinstance(skills, str) or not skills.startswith("./"):
         fail("plugin skills must be one relative string beginning with ./")
-    if not (ROOT / skills).is_dir():
+    skills_root = ROOT / skills
+    if not skills_root.is_dir():
         fail("plugin skills path does not exist")
+    direct_skill = (skills_root / "SKILL.md").is_file()
+    nested_skill = any(
+        child.is_dir() and (child / "SKILL.md").is_file() for child in skills_root.iterdir()
+    )
+    if not direct_skill and not nested_skill:
+        fail("plugin skills path does not contain SKILL.md")
     required_interface = {
         "displayName",
         "shortDescription",

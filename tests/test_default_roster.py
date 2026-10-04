@@ -7,7 +7,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ROSTER = ROOT / "skills" / "wechat-article-subscriber" / "assets" / "default_subscriptions.json"
+ROSTER = ROOT / "assets" / "default_subscriptions.json"
 
 
 def load_roster() -> list[dict[str, str]]:

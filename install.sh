@@ -29,7 +29,7 @@ if [ -n "$DESTINATION" ] && [ "$TARGET" = "all" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_DIR="$SCRIPT_DIR/skills/wechat-article-subscriber"
+SOURCE_DIR="$SCRIPT_DIR"
 if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="$(command -v python3)"
 elif command -v python >/dev/null 2>&1; then
