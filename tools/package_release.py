@@ -13,11 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "wechat-article-subscriber"
 TOP_FILES = (
     "LICENSE",
-    "README.md",
-    "CHANGELOG.md",
-    "CODE_OF_CONDUCT.md",
-    "CONTRIBUTING.md",
-    "SECURITY.md",
     "install.sh",
     "install.ps1",
 )
